@@ -1,0 +1,273 @@
+diff --git a/src/voip/facade.rs b/src/voip/facade.rs
+index df4f0530..c963f1fa 100644
+--- a/src/voip/facade.rs
++++ b/src/voip/facade.rs
+@@ -199,0 +200,2 @@ pub struct AcceptCall<'a> {
++    #[cfg(feature = "voip-relay-native")]
++    relay_failover: bool,
+@@ -231,0 +234,2 @@ impl<'a> AcceptCall<'a> {
++            #[cfg(feature = "voip-relay-native")]
++            relay_failover: false,
+@@ -244,0 +249,9 @@ impl<'a> AcceptCall<'a> {
++    /// Give the resident media backend alternative relay hosts from the same direct inbound offer.
++    /// The call still sends one preaccept and one accept.
++    #[cfg(feature = "voip-relay-native")]
++    #[must_use]
++    pub fn with_relay_failover(mut self) -> Self {
++        self.relay_failover = true;
++        self
++    }
++
+@@ -651,0 +665,4 @@ impl<'a> AcceptCall<'a> {
++        #[cfg(feature = "voip-relay-native")]
++        if self.relay_failover && group.is_none() {
++            spec.add_inbound_relay_alternatives(relay);
++        }
+diff --git a/src/voip_control/wacore_backend.rs b/src/voip_control/wacore_backend.rs
+index 99258301..ab74b732 100644
+--- a/src/voip_control/wacore_backend.rs
++++ b/src/voip_control/wacore_backend.rs
+@@ -13,0 +14 @@
++use std::future::Future;
+@@ -17,0 +19,2 @@ use bytes::Bytes;
++use futures::future::{Either, select};
++use futures::stream::{FuturesUnordered, StreamExt};
+@@ -21 +24 @@ use wacore::voip::media_session::ResidentMediaSession;
+-use wacore::voip::transport::RelayEndpointParams;
++use wacore::voip::transport::{RelayEndpointParams, RelayTransport, RelayTransportEvent};
+@@ -38,0 +42,75 @@ pub(crate) const RELAY_DIAL_CEILING: Duration = Duration::from_secs(20);
++/// Give a responsive primary relay the call without opening sockets to other hosts.
++const PRIMARY_RELAY_HEAD_START: Duration = Duration::from_millis(750);
++
++type RelayConnection = (
++    Arc<dyn RelayTransport>,
++    async_channel::Receiver<RelayTransportEvent>,
++);
++
++fn relay_dial_timeout() -> MediaSetupError {
++    MediaSetupError::Connect(format!(
++        "the relay transport did not connect within {RELAY_DIAL_CEILING:?}"
++    ))
++}
++
++/// Dial the primary first and only start alternatives if it fails or is still pending.
++/// All futures stay inside the one call setup and are dropped on a winner or cancellation.
++async fn race_relay_dials<T, F, Fut>(
++    runtime: &dyn wacore::runtime::Runtime,
++    spec: &mut MediaSessionSpec,
++    dial: F,
++) -> Result<T, MediaSetupError>
++where
++    F: Fn(RelayEndpointParams) -> Fut,
++    Fut: Future<Output = Result<T, MediaSetupError>>,
++{
++    wacore::runtime::timeout(runtime, RELAY_DIAL_CEILING, async {
++        let endpoint = RelayEndpointParams::from_spec(spec).ok_or(MediaSetupError::BadEndpoint)?;
++        let primary = dial(endpoint);
++        futures::pin_mut!(primary);
++        let primary_error =
++            match wacore::runtime::timeout(runtime, PRIMARY_RELAY_HEAD_START, primary.as_mut()).await
++            {
++                Ok(Ok(connection)) => return Ok(connection),
++                Ok(Err(error)) => Some(error),
++                Err(_) => None,
++            };
++
++        let mut pending = FuturesUnordered::new();
++        for candidate in std::mem::take(&mut spec.relay_alternatives) {
++            let endpoint = RelayEndpointParams::from_alternative(&candidate, &spec.integrity_key);
++            let dial = dial(endpoint);
++            pending.push(async move { (candidate, dial.await) });
++        }
++        let alternative = async {
++            while let Some((candidate, result)) = pending.next().await {
++                if let Ok(connection) = result {
++                    return Some((candidate, connection));
++                }
++            }
++            None
++        };
++        futures::pin_mut!(alternative);
++        let (candidate, connection) = if let Some(error) = primary_error {
++            alternative.await.ok_or(error)?
++        } else {
++            // `select` polls the primary first if both are ready at the same time.
++            match select(primary, alternative).await {
++                Either::Left((Ok(connection), _)) => return Ok(connection),
++                Either::Left((Err(error), alternative)) => alternative.await.ok_or(error)?,
++                Either::Right((Some(winner), _)) => winner,
++                Either::Right((None, primary)) => return primary.await,
++            }
++        };
++
++        // The engine must authenticate STUN to the same offered host that opened transport.
++        spec.relay_ip = candidate.addr.ip().to_string();
++        spec.relay_port = candidate.addr.port();
++        spec.relay_token = candidate.relay_token;
++        spec.auth_token = candidate.auth_token;
++        log::info!("voip: inbound relay connected on an alternate offered host");
++        Ok(connection)
++    })
++    .await
++    .map_err(|_| relay_dial_timeout())?
++}
+@@ -140,0 +219,22 @@ impl WacoreVoipMediaBackend {
++    async fn connect_relay(
++        &self,
++        client: &crate::client::Client,
++        endpoint: &RelayEndpointParams,
++    ) -> Result<RelayConnection, MediaSetupError> {
++        let factory =
++            client
++                .relay_transport_factory(endpoint)
++                .await
++                .map_err(|error| match error {
++                    // Preserve the variant across the seam: the facade maps it back on return, so a
++                    // provider refusal arrives as the same `Setup` it left as.
++                    crate::client::CallError::Connect(reason) => MediaSetupError::Connect(reason),
++                    crate::client::CallError::Setup(reason) => MediaSetupError::Backend(reason),
++                    other => MediaSetupError::Backend(other.to_string()),
++                })?;
++        wacore::runtime::timeout(&*self.runtime, RELAY_DIAL_CEILING, factory.connect())
++            .await
++            .map_err(|_| relay_dial_timeout())?
++            .map_err(|error| MediaSetupError::Connect(error.to_string()))
++    }
++
+@@ -179 +279 @@ impl VoipMediaBackend for WacoreVoipMediaBackend {
+-        spec: MediaSessionSpec,
++        mut spec: MediaSessionSpec,
+@@ -197,0 +298,11 @@ impl VoipMediaBackend for WacoreVoipMediaBackend {
++        let client_ref = &*client;
++        let connection = if spec.relay_alternatives.is_empty() {
++            None
++        } else {
++            Some(
++                race_relay_dials(&*self.runtime, &mut spec, |endpoint| async move {
++                    self.connect_relay(client_ref, &endpoint).await
++                })
++                .await?,
++            )
++        };
+@@ -216,25 +327,3 @@ impl VoipMediaBackend for WacoreVoipMediaBackend {
+-        let factory =
+-            client
+-                .relay_transport_factory(&endpoint)
+-                .await
+-                .map_err(|error| match error {
+-                    // Preserve the variant across the seam: the facade maps it back on return, so a
+-                    // provider refusal arrives as the same `Setup` it left as instead of a doubly
+-                    // wrapped "call setup failed: media session setup failed: ...".
+-                    crate::client::CallError::Connect(reason) => MediaSetupError::Connect(reason),
+-                    crate::client::CallError::Setup(reason) => MediaSetupError::Backend(reason),
+-                    other => MediaSetupError::Backend(other.to_string()),
+-                })?;
+-        // The dial runs under a ceiling: a provider factory that never resolves must fail the
+-        // call, not park it. Dropping this future (the control plane's ended race) drops the
+-        // in-flight connect with it.
+-        let dialed =
+-            wacore::runtime::timeout(&*self.runtime, RELAY_DIAL_CEILING, factory.connect()).await;
+-        let (transport, relay_events) = match dialed {
+-            Ok(Ok(pair)) => pair,
+-            Ok(Err(error)) => return Err(MediaSetupError::Connect(error.to_string())),
+-            Err(_) => {
+-                return Err(MediaSetupError::Connect(format!(
+-                    "the relay transport did not connect within {RELAY_DIAL_CEILING:?}"
+-                )));
+-            }
++        let (transport, relay_events) = match connection {
++            Some(connection) => connection,
++            None => self.connect_relay(client_ref, &endpoint).await?,
+diff --git a/wacore/src/voip_control/engine_bridge.rs b/wacore/src/voip_control/engine_bridge.rs
+index 9ee55e93..910196ab 100644
+--- a/wacore/src/voip_control/engine_bridge.rs
++++ b/wacore/src/voip_control/engine_bridge.rs
+@@ -60,0 +61 @@ pub fn into_engine_parts(spec: MediaSessionSpec) -> Result<EngineParts, MediaSet
++        relay_alternatives: _,
+diff --git a/wacore/src/voip_control/mod.rs b/wacore/src/voip_control/mod.rs
+index 0d1eeb28..877f3d62 100644
+--- a/wacore/src/voip_control/mod.rs
++++ b/wacore/src/voip_control/mod.rs
+@@ -377,0 +378,4 @@ pub struct MediaSessionSpec {
++    /// Distinct hosts from the same authenticated direct inbound offer, for a resident dial.
++    #[doc(hidden)]
++    #[builder(default)]
++    pub relay_alternatives: Vec<MediaRelayCandidate>,
+@@ -387,0 +392,8 @@ pub struct MediaSessionSpec {
++/// Relay allocation and transport credentials for one alternative in an inbound offer.
++#[doc(hidden)]
++pub struct MediaRelayCandidate {
++    pub addr: std::net::SocketAddrV4,
++    pub relay_token: Vec<u8>,
++    pub auth_token: Vec<u8>,
++}
++
+diff --git a/wacore/src/voip_control/spec_build.rs b/wacore/src/voip_control/spec_build.rs
+index ab76e660..f0d30a21 100644
+--- a/wacore/src/voip_control/spec_build.rs
++++ b/wacore/src/voip_control/spec_build.rs
+@@ -7,0 +8,3 @@
++use std::collections::HashSet;
++use std::net::{Ipv4Addr, SocketAddrV4};
++
+@@ -12 +15,2 @@ use super::{
+-    CallDirection, MediaAudioIo, MediaAudioSpec, MediaSessionKey, MediaSessionSpec, MediaSetupError,
++    CallDirection, MediaAudioIo, MediaAudioSpec, MediaRelayCandidate, MediaSessionKey,
++    MediaSessionSpec, MediaSetupError,
+@@ -16,0 +21,2 @@ const WARP_MI_TAG_LEN: usize = 4;
++/// Keep the original plus at most three other distinct hosts inside a single dial deadline.
++const MAX_ALTERNATE_RELAY_HOSTS: usize = 3;
+@@ -103,0 +110 @@ impl MediaSessionSpec {
++            relay_alternatives: Vec::new(),
+@@ -181,0 +189 @@ impl MediaSessionSpec {
++            relay_alternatives: Vec::new(),
+@@ -189,0 +198,31 @@ impl MediaSessionSpec {
++
++    /// Retain alternatives from this direct inbound offer without copying the call key.
++    #[doc(hidden)]
++    pub fn add_inbound_relay_alternatives(&mut self, relay: &RelayData) {
++        let mut hosts = HashSet::new();
++        if let Ok(primary) = self.relay_ip.parse::<Ipv4Addr>() {
++            hosts.insert(primary);
++        }
++        self.relay_alternatives = relay
++            .endpoints
++            .iter()
++            .filter_map(|endpoint| {
++                let (ip, port) = get_primary_ipv4_address(endpoint)?;
++                let ip = ip.parse::<Ipv4Addr>().ok()?;
++                let token = relay
++                    .relay_tokens
++                    .get(endpoint.token_id as usize)
++                    .filter(|token| !token.is_empty())?;
++                // Each native factory already races eligible ports on its host.
++                if port == 0 || !hosts.insert(ip) {
++                    return None;
++                }
++                Some(MediaRelayCandidate {
++                    addr: SocketAddrV4::new(ip, port),
++                    relay_token: token.clone(),
++                    auth_token: select_auth_token(&relay.auth_tokens, endpoint.auth_token_id),
++                })
++            })
++            .take(MAX_ALTERNATE_RELAY_HOSTS)
++            .collect();
++    }
+diff --git a/wacore/src/voip_control/transport.rs b/wacore/src/voip_control/transport.rs
+index f2266905..313956e7 100644
+--- a/wacore/src/voip_control/transport.rs
++++ b/wacore/src/voip_control/transport.rs
+@@ -164,0 +165,13 @@ impl RelayEndpointParams {
++
++    /// Build dial parameters for an alternative in the same direct inbound offer.
++    #[doc(hidden)]
++    pub fn from_alternative(
++        candidate: &super::MediaRelayCandidate,
++        integrity_key: &[u8],
++    ) -> Self {
++        Self {
++            addr: SocketAddr::V4(candidate.addr),
++            ice_ufrag: super::relay_parse::token_to_ice_ufrag(&candidate.auth_token),
++            ice_pwd: String::from_utf8_lossy(integrity_key).into_owned(),
++        }
++    }
