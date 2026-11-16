@@ -1,5 +1,8 @@
 # PRD dan checklist WA Control & Live
 
+Gunakan [arah dan aturan pengembangan](AGENTS.md) bersama
+[status kandidat terbaru](STATUS.md).
+
 ## Hasil yang ingin dicapai
 
 WA Control & Live adalah satu plugin komunitas untuk Hermes Agent yang
@@ -9,7 +12,8 @@ akun dari terminal, memilih cara login dan provider yang tersedia bagi mereka,
 lalu mengatur WhatsApp dan audio Live dari Hermes.
 
 - **A adalah nomor bot Hermes.** Satu koneksi Rust untuk akun A melayani DM
-  pemilik, Control, dan telepon Live.
+  pemilik, Control, dan telepon Live. Penautan A untuk plugin memakai perangkat
+  tertaut plugin ini. Satu penautan A berlaku untuk ketiga fungsi tersebut.
 - **B adalah nomor pribadi yang dipakai pemilik untuk menghubungi A.** Pemilik
   bisa menautkan B secara terpisah untuk mengontrol akun pribadinya. B juga bisa
   tetap dipakai hanya untuk menghubungi A. Akun Control tambahan memakai Baileys.
@@ -20,9 +24,32 @@ lalu mengatur WhatsApp dan audio Live dari Hermes.
   Sesi baru, sesi lama yang dilanjutkan, pesan teks saat menelepon, transkrip,
   konteks lampiran, dan pekerjaan Hermes mengikuti percakapan itu. Provider
   audio bisa diganti sambil mempertahankan sesi Hermes dan panggilan WhatsApp.
+  Target penerimaan mengikuti perilaku Voice di ChatGPT Desktop dari sudut
+  pandang pemilik, terutama kontinuitas konteks, interupsi, dan hasil pekerjaan
+  saat berpindah antara tulisan dan suara.
 - Kode inti Hermes mengikuti upstream. Gunakan API publik untuk lifecycle,
   setup, perintah, dan kredensial. Catat penggunaan API internal pada integrasi
   sesi dan uji ulang pada setiap build Hermes yang dinyatakan didukung.
+
+## Pemilik dan chatbot tamu
+
+- Dari DM pemilik, perintah natural ke Hermes dapat memilih akun dan mengatur
+  pesan, file, Status, grup, serta kebijakan chatbot. Izin mengikuti akun
+  dan permintaan pemilik yang diverifikasi.
+- Chatbot tamu memakai instruksi yang dapat diubah untuk tiap akun. Pilihan
+  DM dan grup dapat dinonaktifkan, dibatasi ke daftar yang diizinkan, atau
+  dibuka sesuai konfigurasi. Grup dapat mensyaratkan mention atau menerima
+  balasan tanpa mention pada grup yang dikonfigurasi.
+- Model tamu memakai konteks chat tersebut sesuai jumlah pesan terakhir yang
+  disetel. Sebagai contoh, pemilik dapat memilih 20 pesan atau menonaktifkan
+  riwayat. Akses alat, konteks pemilik, dan riwayat chat lain tetap terpisah
+  dari model tamu.
+- Model boleh mengenali maksud untuk berbicara dengan manusia dalam bahasa
+  natural. Durasi jeda handoff bisa disetel. Setelah jeda habis atau pemilik
+  melanjutkannya, tanggapi pesan baru yang memenuhi aturan chat.
+- Dukungan media tamu mencakup baca gambar, transkripsi voice note, dan
+  balasan teks atau voice note sesuai pengaturan dan kemampuan provider.
+  [Panduan kebijakan chatbot](whatsapp_control/README.md)
 
 ## Setup publik dan perintah singkat
 
@@ -189,9 +216,10 @@ arah teruji.
    perintah memilih alias untuk panggilan berikutnya. Fallback otomatis
    memilih anggota lain untuk panggilan tersebut dan tetap mengikuti pool
    yang dipilih pengguna.
-5. **Bedakan resumption dan pindah provider.** Pakai resumption bawaan jika
-   provider mendukungnya untuk sesi dan kredensial yang sama. Untuk kredensial
-   atau provider lain, buat sesi audio pada tujuan dan isi konteks dari Hermes.
+5. **Bedakan resumption dan pindah provider.** Resumption bawaan dapat
+   dipertimbangkan untuk sesi dan kredensial yang sama jika provider
+   mendukungnya. Untuk kredensial atau provider lain, buat sesi audio pada
+   tujuan dan isi konteks dari Hermes.
    Jika rotasi ada di gateway eksternal, plugin memilih endpoint gateway
    tersebut dan gateway mengelola akun yang disembunyikan di belakangnya.
 
@@ -200,8 +228,9 @@ pengganti sebelum mematikan audio lama yang sehat. Saat audio putus, kandidat
 yang tersedia dicoba dulu. Jika kandidat habis karena gangguan sementara, satu
 percobaan ulang ke akun yang sama dapat membuka sesi audio baru setelah jeda
 retry, selama masih dalam batas waktu pemulihan panggilan. Sesi baru mengambil
-konteks dari Hermes. Resumption Gemini dengan handle dan fork GPT-Live masih
-terbuka. Kedua mekanisme memiliki syarat penyimpanan di sisi provider.
+konteks dari Hermes. Resumption Gemini dengan handle dan fork GPT-Live adalah
+pilihan teknis yang masih terbuka. Keduanya memiliki syarat penyimpanan di
+sisi provider.
 
 [Rotasi akun 9Router](https://github.com/decolua/9router/blob/v0.5.119/src/sse/services/auth.js#L131-L181)
 · [Kuota Gemini](https://aistudio.google.com/docs/rate-limits)
@@ -254,7 +283,11 @@ ditangani lewat setup dan penyimpanan secret di profil yang bersangkutan.
 | Bot menerima telepon pemilik | Siapkan koneksi audio selama dering jika transport mendukung, lalu jawab dengan jalur yang siap. | Jika semua kandidat gagal sebelum dijawab, kirim penjelasan privat lewat DM pemilik saat WhatsApp masih terhubung. Bedakan kegagalan provider, penelepon menutup saat setup, nomor yang tidak berwenang, serta gangguan media WhatsApp. Pemohon yang tidak berwenang hanya mendapat penanganan panggilan yang berlaku untuk akses tersebut. |
 | Pemilik minta pindah provider saat telepon berjalan | Siapkan tujuan, sinkronkan konteks terbaru, lalu pindah dan laporkan provider aktif setelah siap. | Jika tujuan gagal dan koneksi lama sehat, lanjutkan audio lama dan kabari kegagalan pilihan baru. Jika koneksi lama sudah putus, ikuti alur pemulihan di bawah. |
 | Koneksi audio aktif berhenti | Beri kabar singkat saat pemulihan menimbulkan jeda, lalu lanjutkan audio dan percakapan setelah tersambung. | Jika semua opsi habis atau waktu tunggunya di luar batas pemulihan panggilan, putar pemberitahuan singkat dari audio lokal apabila media WhatsApp masih bisa dipakai. Selesaikan playout dalam batas waktu lalu tutup panggilan dengan status yang benar. Kirim penjelasan dan tindakan pemulihan ke DM pemilik bila tersedia. |
-| Media atau koneksi WhatsApp ikut putus | Gunakan DM pemilik jika jalur chat masih tersedia. | Catat notifikasi yang belum terkonfirmasi dan tampilkan di `status`. Saat koneksi DM pulih, kirim yang tertunda hanya jika hasil sebelumnya memungkinkan retry dengan aman. |
+| Media atau koneksi WhatsApp ikut putus | Gunakan DM pemilik jika jalur chat masih tersedia. | Catat hasil notifikasi yang belum terkonfirmasi dan tampilkan di `status`. |
+
+**Usulan lanjutan.** Setelah koneksi chat WhatsApp bot pulih, pengiriman ulang
+otomatis bisa dipertimbangkan hanya ketika pesan sebelumnya diketahui belum
+terkirim. Perilaku ini masih berupa usulan implementasi.
 
 Audio pemberitahuan memakai klip lokal yang dapat diputar melalui jalur PCM
 sidecar. Pesan DM memakai pengiriman teks langsung dari akun bot A ke pemilik
@@ -353,15 +386,15 @@ dan penutupan regresi yang memblokir rilis.
 | Broker Realtime Hermes | Konektor memakai `LiveCall` | Fixture broker, sesi WebRTC lokal dua arah, delegasi Hermes, dan fallback saat login ulang. Uji akun nyata ditunda setelah broker mengembalikan `auth_required` |
 | Pool round robin dan pindah audio di tengah telepon | Tersedia di kandidat | Uji rotasi provider dan akun, cutover serta kegagalan kandidat pada satu WebSocket dan sesi Hermes. Panggilan nyata masih terbuka |
 | Penyebab kegagalan, notifikasi, dan pemulihan | Implementasi sebagian | Fallback pool, status per akun, klip lokal, dan DM kegagalan tersedia di kandidat. Uji perangkat nyata masih terbuka |
-| Uji akun nyata dan rilis GitHub | Menunggu kandidat rilis | Uji akun nyata untuk kandidat gabungan masih terbuka |
+| Uji akun nyata dan rilis | Snapshot pengembangan sudah publik | Uji akun nyata dan penerimaan rilis masih terbuka |
 
 ### 1. Pertahankan plugin gabungan
 
 - [x] Satu manifest dan lifecycle plugin menggabungkan kode Control dan Live.
   Bot A memakai Rust. Akun tambahan memakai Baileys. Kode pairing terminal,
   verifikasi identitas, dan chatbot per akun tersedia.
-- [x] Jalur Codex dan integrasi sesi Hermes punya pengujian lokal. Kandidat
-  terakhir lulus 486 tes Python, 82 tes Rust, dan 5 tes Node. Siklus install,
+- [x] Jalur Codex dan integrasi sesi Hermes punya pengujian lokal. Baseline
+  awal lulus 486 tes Python, 82 tes Rust, dan 5 tes Node. Siklus install,
   enable, disable, dan remove diuji pada profil sementara. Audit lanjutan
   menjalankan ulang 46 tes launcher, lifecycle, dan routing akun pada
   Hermes v0.23.1 dengan profil terisolasi. Jalur setup build saat ini ada di
@@ -554,4 +587,4 @@ Output build, cache, virtualenv, dan data runtime lokal mengikuti `.gitignore`.
   chatbot yang gagal dengan handoff aktif, dan gangguan Live saat Control
   serta chat Hermes masih tersedia.
 - [ ] Cocokkan semua skenario penerimaan dengan bukti build rilis, tutup
-  regresi penghalang, lalu publikasikan repositori GitHub.
+  regresi penghalang, lalu terbitkan rilis yang lulus penerimaan.

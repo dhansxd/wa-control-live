@@ -3,6 +3,7 @@
 Repositori ini menyimpan snapshot sumber pengembangan WA Control & Live.
 Jika memasang dari mesin baru, ikuti [prasyarat, instalasi, dan setup](README.md#setup-plugin).
 Untuk melanjutkan pengembangan, lihat [PRD dan checklist](PLAN.md).
+Ikuti [arah dan aturan pengembangan](AGENTS.md) sebelum memilih tugas berikutnya.
 
 ## Sudah ada di kode
 
@@ -50,8 +51,9 @@ menjalankan wizard atau layanan WhatsApp.
 
 ## Pekerjaan kode tersisa
 
-- Resumption asli melalui handle Gemini dan fork GPT-Live. Pemulihan saat ini
-  memakai koneksi audio pengganti dengan konteks Hermes yang sama.
+- Resumption asli melalui handle Gemini dan fork GPT-Live adalah pilihan
+  teknis yang masih terbuka. Pemulihan saat ini memakai koneksi audio pengganti
+  dengan konteks Hermes yang sama.
 - Rincian penyebab dan waktu retry per alias pada `/walive status`, serta
   penanganan status perangkat bot yang dicabut.
 - Cakupan tes klasifikasi kegagalan provider lintas konektor. Usulan untuk
