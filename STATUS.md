@@ -23,10 +23,17 @@ Regresi kandidat sebelum publikasi lulus **680 tes Python, 15 subtes,
 Hermes v0.23.1 terisolasi, dan simulasi telepon. Tujuh tes Rust yang memerlukan
 provider nyata dilewati pada putaran itu.
 
+Untuk commit publik awal `9f9992575468a6935fdf0490209b0836b8313e90`,
+regresi Python dan Baileys dijalankan ulang. Instalasi dependensi Node dari
+lockfile juga lulus pada salinan sumber bersih. Pada profil Hermes v0.23.1
+sementara, instalasi dari URL GitHub publik, registrasi perintah setup,
+disable, enable kembali, dan remove lulus. Pengujian CLI ini berhenti sebelum
+menjalankan wizard atau layanan WhatsApp.
+
 ## Masih perlu dibuktikan
 
-- Instalasi lengkap dari clone bersih, build sidecar release, wizard dengan
-  perangkat nyata, dan siklus update serta remove/purge pada kandidat rilis.
+- Build sidecar release dari clone bersih, wizard dengan perangkat nyata,
+  serta siklus update dan purge dengan layanan tertaut pada kandidat rilis.
 - Control akun A dan akun tambahan yang berjalan bersamaan, visibilitas Status
   serta audiens di perangkat penerima, izin admin grup, dan chatbot dengan
   media serta handoff pada akun nyata.
