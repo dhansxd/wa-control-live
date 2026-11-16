@@ -2,8 +2,8 @@
 
 Repositori ini menyimpan snapshot sumber pengembangan WA Control & Live.
 Jika memasang dari mesin baru, ikuti [prasyarat, instalasi, dan setup](README.md#setup-plugin).
-Untuk melanjutkan pengembangan, lihat [PRD dan checklist](PLAN.md).
-Ikuti [arah dan aturan pengembangan](AGENTS.md) sebelum memilih tugas berikutnya.
+Untuk melanjutkan pengembangan, buka [handoff](HANDOFF.md),
+[PRD dan checklist](PLAN.md), dan [aturan pengembangan](AGENTS.md).
 
 ## Sudah ada di kode
 

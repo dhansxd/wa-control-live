@@ -10,7 +10,8 @@ WebSocket yang kompatibel dengan GPT-Live.
 **Status pengembangan.** Integrasi dan regresi lokal tersedia. Instalasi
 lengkap dengan WhatsApp dan provider nyata masih perlu diverifikasi pada calon
 rilis. Lihat [status fitur, batas verifikasi, dan pekerjaan tersisa](STATUS.md).
-Untuk melanjutkan pengembangan, ikuti [arah dan aturan proyek](AGENTS.md).
+Untuk melanjutkan proyek dari clone atau sesi baru, mulai dari
+[HANDOFF.md](HANDOFF.md) dan [aturan proyek](AGENTS.md).
 
 ## Setup plugin
 

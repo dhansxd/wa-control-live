@@ -1,5 +1,6 @@
 # Arah dan aturan pengembangan WA Control & Live
 
+Baca [handoff](HANDOFF.md) saat memulai dari clone atau sesi baru.
 Baca [PRD dan checklist](PLAN.md) untuk ruang lingkup dan perilaku yang diminta.
 Cocokkan dengan [status kandidat](STATUS.md), kode yang ada, pengujian, dan
 riwayat Git yang tersedia sebelum menentukan pekerjaan berikutnya. Implementasi
