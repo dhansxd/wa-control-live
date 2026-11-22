@@ -128,7 +128,8 @@ def test_phone_identity_and_language_reach_initial_developer_context(tmp_path, m
     assert 'hangat dan ekspresif sesuai suasana obrolan' in identity
     assert 'Mulai dengan jawaban atau tindakan yang diminta.' in identity
     assert 'Lewati pembuka yang hanya menyatakan bahwa kamu paham' in identity
-    assert 'sebut singkat rencanamu sekali jika berguna' in identity
+    assert 'sebut rencanamu dalam satu kalimat singkat' in identity
+    assert 'Tetap tanggapi obrolan dan pertanyaan baru secara langsung selama pekerjaan berjalan.' in identity
     assert 'Sebut pekerjaan selesai atau hasil terkirim hanya jika terbukti.' in identity
     assert 'apa yang sedang kamu kerjakan dengan sudut pandang orang pertama' in identity
     assert identity.startswith('Kamu adalah Hermes Agent.\n\n')

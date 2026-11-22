@@ -131,6 +131,23 @@ Kandidat pengetikan dan gaya bicara lulus **721 tes Python, 17 subtes,
 Paket macOS arm64 dibangun ulang dan cocok dengan checksum sumbernya.
 Tampilan indikator mengetik di ponsel masih perlu diamati.
 
+Pada `5af8963`, pemilik mengonfirmasi indikator mengetik terlihat. Pada
+panggilan nyata, Live menjawab singkat setelah ucapan final tetapi belum
+menyebut tindakan yang diminta. Tanda terima Hermes muncul 7,46 detik
+kemudian, saat pemilik sudah masuk giliran berikutnya. Giliran Hermes
+selesai dan teks dikirim ke DM. Log tidak mencatat panggilan alat pada
+giliran itu, sehingga panggilan tersebut belum menguji progres tool.
+
+Kandidat berikutnya meminta satu tanggapan rencana yang spesifik sambil
+mengirim tugas ke sesi yang sama. Simulasi menahan tanda terima Hermes
+dan memverifikasi audio tanggapan awal serta jawaban atas pertanyaan biasa
+sudah lewat sebelum tanda terima tiba. Pertanyaan progres membaca langkah
+alat terbaru dari eksekusi yang diverifikasi. Panggilan WhatsApp dengan
+pekerjaan alat yang berlangsung lama masih menjadi uji penerimaan.
+Regresi lulus **729 tes Python dan 17 subtes**. Pada probe Codex Realtime,
+masukan suara sintetis menghasilkan rencana konkret dan jawaban atas
+pertanyaan santai sebelum tanda terima tugas simulasi dibuka.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak

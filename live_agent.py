@@ -1100,9 +1100,19 @@ async def _run(home, owner_number, request, *, resolve, read_history=_read_histo
                                             _timeout=5)
                     if chat['session_id'] != session_id:
                         return {'status': 'session_changed'}
+                result = _work_status(observed_receipt, chat)
+                if result['status'] == 'started' and request.get('include_progress') is True:
+                    # The voice provider can be behind on its context acknowledgments.
+                    # Read progress from the same verified execution as the receipt.
+                    active_work = [{**binding, 'status': 'started'}]
+                    progress = await _replay_tool_progress(client, chat, session_id, active_work)
+                    result['tool_steps'] = [
+                        {'tool': step['tool_name'], 'status': step['phase'], 'detail': step['detail']}
+                        for step in progress
+                    ]
                 if await asyncio.to_thread(resolve, home, owner_number) != current_route:
                     return {'status': 'unknown', **binding}
-                return {**_work_status(observed_receipt, chat), **binding}
+                return {**result, **binding}
             if action == 'recall':
                 return {'status': 'found' if history else 'not_found',
                         'session_id': session_id, 'history': history}

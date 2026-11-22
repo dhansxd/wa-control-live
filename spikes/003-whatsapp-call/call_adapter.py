@@ -43,7 +43,7 @@ CALL_PROMPT = (
     'Saat berbicara, tanggapi dengan hangat dan ekspresif sesuai suasana obrolan. '
     'Mulai dengan jawaban atau tindakan yang diminta. '
     'Lewati pembuka yang hanya menyatakan bahwa kamu paham atau mengulang ucapan pemilik. '
-    'Untuk pekerjaan yang jelas, sebut singkat rencanamu sekali jika berguna. '
+    'Saat menerima permintaan kerja yang jelas, sebut rencanamu dalam satu kalimat singkat. '
     'Sebut tindakan dan tujuan yang diminta secara konkret, tanpa sekadar berjanji akan memberi kabar. '
     'Misalnya, saat diminta mencari sesuatu dan mengirimnya ke WhatsApp, '
     'kamu bisa berkata dengan gayamu sendiri, seperti "Aku cari dulu, lalu aku kirim ke WhatsApp." '
@@ -55,6 +55,8 @@ CALL_PROMPT = (
     'Jawab langsung dari konteks dan hasil yang sudah tersedia. Jika detail lama belum tersedia, '
     'ambil dari riwayat percakapan ini. '
     'Pakai progres dan hasil dari pekerjaan DM yang sama, termasuk saat membahas lampiran. '
+    'Tetap tanggapi obrolan dan pertanyaan baru secara langsung selama pekerjaan berjalan. '
+    'Jika pemilik bertanya tentang pekerjaan itu, ceritakan langkah yang sungguh sedang kamu kerjakan. '
     'Ajukan delegasi hanya untuk tindakan atau informasi yang memerlukan akses ke sesi WhatsApp atau alat. '
     'Jika pemilik akun memilih agar hasil pekerjaan tetap di DM, teruskan pilihan itu ke client. '
     'Minta persetujuan atau penjelasan hanya jika pekerjaan memang membutuhkannya. '
@@ -88,6 +90,12 @@ WORK_STATUS_CONTEXT = {
 WORK_OPEN_STATUSES = {'pending', 'queued', 'started', 'approval_required', 'clarification_required'}
 WORK_UNCONFIRMED_CONTEXT = (
     'Status terbaru pekerjaan ini belum bisa dipastikan. Data progres sebelumnya tidak mengonfirmasi status sekarang.'
+)
+VOICE_TASK_LAUNCH_CONTEXT = (
+    'Tanggapi permintaan terakhir sekarang dengan satu kalimat pendek dalam bahasamu sendiri. '
+    'Sebut apa yang akan kamu lakukan secara konkret, dengan sudut pandang orang pertama. '
+    'Nyatakan itu sebagai rencana. Gunakan status terkonfirmasi untuk menyatakan pekerjaan sudah dimulai atau selesai. '
+    'Setelah itu, beri ruang pemilik untuk meneruskan obrolan.'
 )
 STEER_ACCEPTED_CONTEXT = 'Arahan baru masuk antrean untuk pekerjaan yang sama.'
 CALL_END_PROMPT = (
@@ -295,7 +303,7 @@ class AgentJobs:
 
     async def observe_work(self, session_id, admission_id):
         return await self._request({'action': 'observe_work', 'session_id': session_id,
-                                    'admission_id': admission_id}, AGENT_CONTEXT_TIMEOUT)
+                                    'admission_id': admission_id, 'include_progress': True}, AGENT_CONTEXT_TIMEOUT)
 
     async def steer_work(self, session_id, admission_id, text):
         return await self._request({'action': 'steer_work', 'session_id': session_id,
@@ -1255,7 +1263,11 @@ class LiveCall:
         generation, steps = self.work_progress.get(admission_id, (None, {}))
         if generation != execution_generation or not steps:
             return ''
-        recent = sorted(steps.values(), key=lambda step: step['status'] == 'started')[-5:]
+        return self.progress_context(steps.values())
+
+    @staticmethod
+    def progress_context(steps):
+        recent = sorted(steps, key=lambda step: step['status'] == 'started')[-5:]
         progress = json.dumps(recent, ensure_ascii=False)
         return 'Jelaskan progres pekerjaanmu dengan kata-katamu sendiri berdasarkan data ini.\n' + progress
 
@@ -1810,7 +1822,9 @@ class LiveCall:
         if not turn.is_set():
             # V3 can wait for this acknowledgment before it closes the user's transcript.
             released_early = await self.append_handoff(
-                item_id, 'Jika perlu merespons, jawab inti ucapan pemilik langsung dari konteks.',
+                item_id, 'Jawab inti ucapan pemilik secara langsung. '
+                'Kalau ia jelas meminta tindakan, sebut langkah konkret yang akan kamu lakukan, '
+                'tanpa menunggu hasil. Kalau ia bertanya tentang pekerjaan yang berjalan, gunakan status terkini.',
                 channel='commentary',
             )
             try:
@@ -2015,7 +2029,11 @@ class LiveCall:
                 reported_item = item_id
                 text = WORK_STATUS_CONTEXT.get(status, WORK_UNCONFIRMED_CONTEXT)
                 if status == 'started':
-                    progress = self.progress_for_work(admission_id, result.get('execution_generation'))
+                    if 'tool_steps' in result:
+                        progress = (self.progress_context(result['tool_steps']) if result['tool_steps'] else
+                                    'Langkah saat ini belum diketahui. Gunakan status terbaru ini.')
+                    else:
+                        progress = self.progress_for_work(admission_id, result.get('execution_generation'))
                     if progress:
                         text += '\n' + progress
                 if steered:
@@ -2042,7 +2060,8 @@ class LiveCall:
                     )
                 return
             text = (
-                'Sampaikan hasil pekerjaanmu berikut dengan kata-katamu sendiri, sesuai obrolan.\n'
+                'Sampaikan hasil terbaru langsung dengan kata-katamu sendiri, sesuai obrolan. '
+                'Lewati status antre atau progres yang sudah berlalu.\n'
                 + output
             )
             await self.present_work_result(item_id, turn_id, admission_id, text, repeat=repeat)
@@ -2186,11 +2205,16 @@ class LiveCall:
         # transcript mirror until a definite pre-admission rejection is known.
         self.native_task_turns.add(turn_id)
         submit = self.submit_task(item_id, turn_id, request, attachment_admission_id=attachment_admission_id)
-        if not released_early:
+        launch_requested = (turn_id == self.current_spoken_turn
+                            and not (self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started))
+        if launch_requested or not released_early:
             result, acknowledged = await asyncio.gather(
                 submit,
-                self.append_handoff(item_id, 'Permintaan sedang diperiksa.',
-                                    channel='commentary'),
+                self.append_handoff(
+                    item_id,
+                    VOICE_TASK_LAUNCH_CONTEXT if launch_requested else 'Permintaan sedang diperiksa.',
+                    channel='speakable' if launch_requested else 'commentary',
+                ),
             )
         else:
             result = await submit
@@ -2206,9 +2230,7 @@ class LiveCall:
             current = turn_id == self.current_spoken_turn
             provisional = status in {'pending', 'queued', 'started', 'unknown'}
             already_replied = self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started
-            audible = current and (not provisional or not already_replied)
-            if audible and status in {'pending', 'queued'}:
-                text += ' Sebut singkat tindakan dan tujuan yang diminta pemilik dengan kata-katamu sendiri.'
+            audible = current and (not provisional or not (launch_requested or already_replied))
             acknowledged = await self.append_handoff(
                 item_id, text, channel='speakable' if audible else 'commentary',
                 audio_turn=turn_id if audible else None,
@@ -2273,6 +2295,7 @@ class LiveCall:
             self.report['backend_completed_delegations'].append(item_id)
             self.report.setdefault('agent_receipts', {})[item_id] = {'admission_id': admission_id}
             return ('Gunakan isi hasil yang tersedia untuk menjawab dengan wajar dan ringkas. '
+                    'Lewati status antre atau progres yang sudah berlalu. '
                     'Kalau pemilik akun meminta hasil lengkap, bacakan bagian yang tersedia tanpa mengarang.\n'
                     + result['output']), status, admission_id
         text = {

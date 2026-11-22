@@ -984,6 +984,55 @@ def test_observing_existing_whatsapp_photo_does_not_submit(tmp_path, state, stat
     }.get(state, ['session.resume', 'prompt.receipt'])
 
 
+def test_observing_running_work_replays_only_current_scoped_tool_steps(tmp_path):
+    admission_id = PHOTO_WORK['admission_id']
+    replay_epoch = 'live-epoch'
+
+    def tool(seq, kind, name, tool_id, *, admission=admission_id, generation=7, args=None):
+        return {'type': kind, 'session_id': 'session-a', 'admission_id': admission,
+                'seq': seq, 'execution_generation': generation, 'replay_epoch': replay_epoch,
+                'payload': {'tool_id': tool_id, 'name': name, 'args': args or {}}}
+
+    class ProgressGateway(FakeGateway):
+        async def rpc(self, method, **params):
+            if method == 'session.events.since':
+                self.calls.append((method, params))
+                assert params['session_id'] == 'session-a' and params['replay_epoch'] == replay_epoch
+                return {'events': [
+                    tool(185, 'tool.start', 'web_extract', 'extract'),
+                    tool(186, 'tool.start', 'terminal', 'unrelated', admission='b' * 32),
+                    tool(187, 'tool.complete', 'web_extract', 'extract'),
+                    tool(188, 'tool.start', 'read_file', 'previous-run', generation=6),
+                    tool(189, 'tool.start', 'read_file', 'read', args={'path': '/private/work/notes.txt'}),
+                ]}
+            result = await super().rpc(method, **params)
+            if method == 'session.resume':
+                result.update({'replay_epoch': replay_epoch, 'last_sequence': 187, 'pending': [{
+                    'admission_id': admission_id, 'status': 'started', 'execution_generation': 7,
+                }]})
+            return result
+
+    gateway = ProgressGateway()
+    gateway.admissions['native'] = {'admission_id': admission_id, 'ref': {'session_id': 'session-a'}}
+    gateway.receipt = {'status': 'started', 'execution_generation': 7}
+    response = asyncio.run(live_agent._run(
+        tmp_path, '1234567890', {'action': 'observe_work', 'session_id': 'session-a',
+                                 'admission_id': admission_id, 'include_progress': True},
+        resolve=gateway.resolve, connect=gateway.connect,
+        read_work=lambda *_: [{**PHOTO_WORK, 'status': 'queued'}],
+    ))
+    assert response == {
+        'status': 'started', 'session_id': 'session-a', 'admission_id': admission_id,
+        'execution_generation': 7, 'tool_steps': [
+            {'tool': 'web_extract', 'status': 'completed', 'detail': ''},
+            {'tool': 'read_file', 'status': 'started', 'detail': 'notes.txt'},
+        ],
+    }
+    assert [method for method, _ in gateway.calls] == [
+        'session.resume', 'prompt.receipt', 'session.resume', 'session.events.since',
+    ]
+
+
 @pytest.mark.parametrize(('native', 'ledger_chat', 'ledger_state', 'mixed', 'expected'), [
     (True, '2468@lid', 'delivered', False, 'sent'),
     (False, '2468@lid', 'attempting', False, 'pending'),

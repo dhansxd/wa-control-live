@@ -40,6 +40,10 @@ pemilik. Panduan OpenAI menjelaskan percakapan yang bisa disela, penggunaan
 konteks tugas yang sudah ada, dan kemampuan berdiskusi, mengecek progres atau
 mengubah arahan sambil pekerjaan berjalan. Artikel teknis OpenAI menjelaskan
 bahwa aliran suara tetap aktif selama delegasi berjalan secara asinkron.
+OpenClaw Talk dan ElevenAgents juga mendokumentasikan tanggapan singkat
+yang bisa diucapkan sebelum pekerjaan selesai. Tanggapan awal menyebut
+rencana dengan bahasa yang alami. Progres yang ditanyakan mengikuti status
+pekerjaan yang sedang aktif.
 Panduan Desktop menjelaskan tombol penutupan untuk pengguna. Kemampuan
 asisten menutup telepon lewat percakapan merupakan syarat pemilik untuk
 plugin ini. Cocokkan cara dan waktunya lewat pembandingan sebelum membuat
@@ -49,7 +53,7 @@ aturan seperti menutup sendiri saat pekerjaan selesai atau saat hening.
 | --- | --- |
 | Mulai dari DM, lalu telepon | Hermes melanjutkan percakapan yang sama, dengan identitas, konteks, lampiran, dan pekerjaan aktif dari DM. Sesudah telepon, lanjutkan lewat DM yang sama. |
 | Kirim pesan biasa ke DM Hermes | WhatsApp menampilkan indikator mengetik dari siklus bawaan Hermes saat agen menyiapkan balasan. |
-| Minta pekerjaan yang butuh waktu, lalu beralih ke obrolan biasa | Asisten tetap bisa menjawab secara alami selama Hermes bekerja. Ucapan biasa atau pertanyaan progres tidak mengubah, mengulang, atau membatalkan tugas. Progres dan hasil berasal dari tugas yang sama. |
+| Minta pekerjaan yang butuh waktu, lalu beralih ke obrolan biasa | Hermes menyebut satu langkah konkret yang akan ia lakukan sambil tugas mulai diproses. Model suara langsung menjawab obrolan baru selama pekerjaan berjalan. Ucapan biasa atau pertanyaan progres tidak mengubah, mengulang, atau membatalkan tugas. Saat ditanya apa yang sedang dilakukan, Hermes menjelaskan langkah terbaru yang terverifikasi dari tugas yang sama. |
 | Minta Hermes mencari sesuatu dan mengirimkannya ke WhatsApp | Hermes dapat menyebut singkat langkahnya sendiri, misalnya bahwa ia akan mencari dulu lalu mengirimkannya ke WhatsApp. Status sudah selesai dan sudah dikirim mengikuti bukti masing-masing. |
 | Jawaban langsung dan jeda setelahnya | Hermes menanggapi inti ucapan dengan nada yang mengikuti obrolan, tanpa pembuka generik di setiap giliran. Setelah menjawab, ia memberi ruang kepada pemilik untuk bicara. Hasil baru dan kendala yang perlu ditangani tetap dapat disampaikan. |
 | Mulai bicara saat asisten sedang menjawab | Audio jawaban lama berhenti saat pemilik menyela, termasuk saat model selesai menghasilkan jawaban tetapi audio masih antre. Panggilan menerima ucapan baru. Tugas aktif tetap berjalan. |
@@ -77,6 +81,8 @@ kesetaraan pengalaman memerlukan pengamatan kedua permukaan.
 · [Gaya bicara GPT-Live saat memakai alat](https://developers.openai.com/api/docs/guides/live-prompting#personality-during-tool-calls)
 · [Waktu menyuarakan hasil di Gemini Live](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/live-api/asynchronous-function-calling)
 · [Percakapan saat pekerjaan berjalan di LiveKit](https://docs.livekit.io/agents/logic/patterns/subagent-delegation/#maintaining-coherence)
+· [OpenClaw Talk realtime](https://docs.openclaw.ai/nodes/talk/realtime-sessions)
+· [Orkestrasi percakapan ElevenAgents](https://elevenlabs.io/blog/unpacking-elevenagents-orchestration-engine)
 · [Panduan evaluasi GPT-Live](https://developers.openai.com/cookbook/examples/audio/voice_agent_evaluation)
 
 ## Pemilik dan chatbot tamu

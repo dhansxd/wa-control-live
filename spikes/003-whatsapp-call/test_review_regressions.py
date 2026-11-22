@@ -139,6 +139,45 @@ def test_transient_receipt_read_after_known_completion_recovers_without_new_work
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize('steps, expected', [
+    ([{'tool': 'read_file', 'status': 'started', 'detail': 'notes.txt'}], 'notes.txt'),
+    ([], 'Langkah saat ini belum diketahui'),
+])
+def test_requested_progress_uses_fresh_observer_instead_of_lagging_voice_context(
+    tmp_path, monkeypatch, steps, expected,
+):
+    async def exercise():
+        answers = []
+        answered = asyncio.Event()
+
+        async def observe_work(session_id, admission_id):
+            assert (session_id, admission_id) == ('session-a', 'admission-a')
+            return {'status': 'started', 'session_id': session_id, 'admission_id': admission_id,
+                    'execution_generation': 7, 'tool_steps': steps}
+
+        async def append(item_id, text, *, channel='speakable'):
+            assert (item_id, channel) == ('status', 'speakable')
+            answers.append(text)
+            answered.set()
+            return True
+
+        voice = voice_fixture(tmp_path, monkeypatch, SimpleNamespace(observe_work=observe_work))
+        voice.append_handoff = append
+        voice.current_spoken_turn = 'owner'
+        voice.work_progress['admission-a'] = (7, {
+            'stale': {'tool': 'web_extract', 'status': 'started', 'detail': 'Langkah lama'},
+        })
+        try:
+            voice.watch_dm_work('admission-a', 'status', 'owner')
+            await asyncio.wait_for(answered.wait(), 1)
+            assert len(answers) == 1 and expected in answers[0]
+            assert 'Langkah lama' not in answers[0]
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize('spoken_request', [
     'Buat catatan uji berisi tes suara berhasil, lalu tambahkan daftar judul.',
     'Coba tugas catatan uji, lalu tambahkan daftar judul.',
@@ -186,15 +225,22 @@ def test_delegated_request_keeps_all_instructions_without_replaying(tmp_path, sp
             await asyncio.wait_for(result_sent.wait(), 2)
             assert submitted == [spoken_request]
             assert routed == [(fragment, spoken_request)]
-            progress, result = returned
+            progress, launch = returned
             assert progress['delegation_item_id'] == 'fixture-delegation'
             assert progress['channel'] == 'commentary'
+            assert launch['delegation_item_id'] == 'fixture-delegation'
+            assert launch['channel'] == 'speakable'
+            result_sent.clear()
+            await voice.on_data({'type':'delegation.context.appended',
+                                 'delegation_item_id':'fixture-delegation'})
+            await asyncio.wait_for(result_sent.wait(), 2)
+            result = returned[2]
             assert result['delegation_item_id'] == 'fixture-delegation'
             assert result['content'][0]['text'].endswith('Berhasil, daftar judul sudah ditambahkan.')
             await voice.on_data({'type':'delegation.context.appended',
                                  'delegation_item_id':'fixture-delegation'})
             await asyncio.gather(*voice.tasks)
-            assert voice.report['acknowledged_delegations'] == ['fixture-delegation', 'fixture-delegation']
+            assert voice.report['acknowledged_delegations'] == ['fixture-delegation'] * 3
         finally:
             await voice.close()
     asyncio.run(exercise())

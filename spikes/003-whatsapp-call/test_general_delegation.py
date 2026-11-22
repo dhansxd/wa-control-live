@@ -280,22 +280,26 @@ def test_confirmed_task_requires_final_transcript_and_returns_real_result(tmp_pa
             submission_id = uuid.uuid5(uuid.NAMESPACE_URL, f'wa-control-live:{tmp_path.name}:caller-1').hex
             assert routed == [''.join(request_parts)]
             assert submitted == [(submission_id, ''.join(request_parts), ACTIVE_WHATSAPP_SESSION)]
+            await wait_until(lambda: len(appended) == 2)
+            assert appended[1]['delegation_item_id'] == 'request-1'
+            assert appended[1]['channel'] == 'speakable'
+            await acknowledge(voice, 'request-1')
             assert not audio_messages(sent)
             await feed_output(voice, remote, 1500)
             assert audio_messages(sent) == [adapter.audio_envelope(struct.pack('<480h', *([1500] * 480)))]
-            assert len(appended) == 1
+            assert len(appended) == 2
             await wait_until(lambda: voice.playout_expected_until <= asyncio.get_running_loop().time())
             release.set()
-            await wait_until(lambda: len(appended) == 2)
-            assert appended[1]['type'] == 'delegation.context.append'
-            assert appended[1]['delegation_item_id'] == 'request-1'
-            assert appended[1]['content'][0]['text'].endswith('Hasil asli Hermes.')
+            await wait_until(lambda: len(appended) == 3)
+            assert appended[2]['type'] == 'delegation.context.append'
+            assert appended[2]['delegation_item_id'] == 'request-1'
+            assert appended[2]['content'][0]['text'].endswith('Hasil asli Hermes.')
             assert voice.report['agent_receipts'] == {'request-1': {'admission_id': 'native-admission'}}
             await acknowledge(voice, 'different-request')
-            assert voice.report['acknowledged_delegations'] == ['request-1']
+            assert voice.report['acknowledged_delegations'] == ['request-1'] * 2
             assert voice.pending_deliveries
             await acknowledge(voice, 'request-1')
-            assert voice.report['acknowledged_delegations'] == ['request-1', 'request-1']
+            assert voice.report['acknowledged_delegations'] == ['request-1'] * 3
             await feed_output(voice, remote, 2000)
             await wait_until(lambda: voice.report['result_audio_forwarded_bytes'] == 960)
         finally:
@@ -497,8 +501,11 @@ def test_unlinked_or_backing_proposal_and_second_item_cannot_repeat_a_task(tmp_p
                 'id': 'caller-1', 'role': 'user', 'transcript': 'Kerjakan satu kali',
             }})
             await wait_until(lambda: len(appended) == 4)
-            assert appended[3]['delegation_item_id'] == 'first'
+            assert (appended[3]['delegation_item_id'], appended[3]['channel']) == ('first', 'speakable')
             assert submitted == ['Kerjakan satu kali']
+            await acknowledge(voice, 'first')
+            await wait_until(lambda: len(appended) == 5)
+            assert (appended[4]['delegation_item_id'], appended[4]['channel']) == ('first', 'commentary')
             await acknowledge(voice, 'first')
         finally:
             await voice.close()
@@ -1140,9 +1147,9 @@ def test_phone_follows_and_steers_one_dm_document_then_keeps_result_in_dm(
     ('unknown', 'unavailable'),
     ('approval_required', 'approval_required'),
 ])
-@pytest.mark.parametrize('already_replied', [False, True])
+@pytest.mark.parametrize('prior_reply', [None, 'turn', 'pcm'])
 def test_pending_voice_task_is_observed_and_result_is_offered_once(
-    tmp_path, monkeypatch, submit_status, first_observation, already_replied,
+    tmp_path, monkeypatch, submit_status, first_observation, prior_reply,
 ):
     async def exercise():
         submitted, observed = [], []
@@ -1172,16 +1179,18 @@ def test_pending_voice_task_is_observed_and_result_is_offered_once(
             await voice.on_data({'type': 'turn.done', 'turn': {
                 'role': 'user', 'id': 'caller-1', 'transcript': request,
             }})
-            event = delegation([request])
-            await voice.on_data(event)
-            await wait_until(lambda: len(appended) == 1)
-            assert appended[0]['channel'] == 'commentary'
-            assert 'sedang diproses' not in appended[0]['content'][0]['text']
-            if already_replied:
+            if prior_reply == 'turn':
                 await voice.on_data({'type': 'turn.created', 'turn': {'role': 'assistant', 'id': 'reply-1'}})
                 await voice.on_data({'type': 'turn.done', 'turn': {
                     'role': 'assistant', 'id': 'reply-1', 'transcript': 'Baik, kita lanjut ngobrol.',
                 }})
+            elif prior_reply == 'pcm':
+                await feed_output(voice, remote, 1500)
+            event = delegation([request])
+            await voice.on_data(event)
+            await wait_until(lambda: len(appended) == 1)
+            assert appended[0]['channel'] == ('commentary' if prior_reply else 'speakable')
+            assert 'sedang diproses' not in appended[0]['content'][0]['text']
             await acknowledge(voice, 'request-1')
             await wait_until(lambda: len(appended) == 2)
             expected_status = {
@@ -1191,8 +1200,7 @@ def test_pending_voice_task_is_observed_and_result_is_offered_once(
                 'approval_required': 'menunggu persetujuan',
             }[submit_status]
             assert expected_status in appended[1]['content'][0]['text']
-            must_speak = not already_replied or submit_status == 'approval_required'
-            assert appended[1]['channel'] == ('speakable' if must_speak else 'commentary')
+            assert appended[1]['channel'] == ('speakable' if submit_status == 'approval_required' else 'commentary')
             await acknowledge(voice, 'request-1')
 
             await wait_until(lambda: len(observed) == 1)
@@ -1200,7 +1208,10 @@ def test_pending_voice_task_is_observed_and_result_is_offered_once(
             await asyncio.wait_for(observing.wait(), 1)
             assert len(appended) == 2
             await feed_output(voice, remote, 1700)
-            assert audio_messages(sent) == [adapter.audio_envelope(struct.pack('<480h', *([1700] * 480)))]
+            spoken_samples = (1500, 1700) if prior_reply == 'pcm' else (1700,)
+            assert audio_messages(sent) == [
+                adapter.audio_envelope(struct.pack('<h', value) * 480) for value in spoken_samples
+            ]
             await wait_until(lambda: voice.playout_expected_until <= asyncio.get_running_loop().time())
 
             await voice.on_data(event)
@@ -1264,7 +1275,7 @@ def test_follow_up_receives_the_voice_started_task_result_once(tmp_path, monkeyp
                 if index == 1:
                     task = voice.tasks[-1]
                 await wait_until(lambda: len(appended) == index)
-                assert appended[-1]['channel'] == 'commentary'
+                assert appended[-1]['channel'] == ('speakable' if index == 1 else 'commentary')
                 await acknowledge(voice, item_id)
                 started = submission_started if index == 1 else observer_started
                 await asyncio.wait_for(started.wait(), 1)
@@ -1282,6 +1293,81 @@ def test_follow_up_receives_the_voice_started_task_result_once(tmp_path, monkeyp
             assert observed == [(ACTIVE_WHATSAPP_SESSION, DM_ADMISSION_ID)]
             assert [(msg['delegation_item_id'], msg['channel']) for msg in appended
                     if output in msg['content'][0]['text']] == [('request-2', 'speakable')]
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+def test_voice_acknowledges_work_and_keeps_talking_before_the_native_receipt(tmp_path, monkeypatch):
+    async def exercise():
+        submission_started, release_submission = asyncio.Event(), asyncio.Event()
+        routes, submissions = [], []
+        request = 'Cari jam buka perpustakaan besok.'
+        question = 'Sambil itu, apa kabar?'
+
+        class Jobs(TranscriptJobs):
+            async def route(self, _proposal, current, _previous, _context, *, session_id):
+                assert session_id == ACTIVE_WHATSAPP_SESSION
+                routes.append(current)
+                return {'status': 'task' if current == request else 'reply'}
+
+            async def submit(self, _submission_id, text, *, session_id):
+                submissions.append((text, session_id))
+                submission_started.set()
+                await release_submission.wait()
+                return {'status': 'queued', 'receipt': {
+                    'session_id': session_id, 'admission_id': DM_ADMISSION_ID,
+                }}
+
+            async def observe_work(self, session_id, admission_id):
+                assert (session_id, admission_id) == (ACTIVE_WHATSAPP_SESSION, DM_ADMISSION_ID)
+                return {'status': 'queued', 'session_id': session_id, 'admission_id': admission_id}
+
+        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+
+        async def turn(kind, role, turn_id, transcript=''):
+            await voice.on_data({'type': kind, 'turn': {
+                'role': role, 'id': turn_id, 'transcript': transcript,
+            }})
+
+        try:
+            await turn('turn.done', 'user', 'caller-1', request)
+            launch = delegation([request])
+            await voice.on_data(launch)
+            await wait_until(lambda: len(appended) == 1)
+            assert (appended[0]['delegation_item_id'], appended[0]['channel']) == ('request-1', 'speakable')
+            assert 'sudut pandang orang pertama' in appended[0]['content'][0]['text']
+            # Submission can start before the provider acknowledges the speech request.
+            await asyncio.wait_for(submission_started.wait(), 1)
+            await acknowledge(voice, 'request-1')
+            await turn('turn.created', 'assistant', 'launch')
+            await feed_output(voice, remote, 1500)
+            await turn('turn.done', 'assistant', 'launch', 'Aku cek jam bukanya untuk besok.')
+
+            await turn('turn.created', 'user', 'caller-2')
+            await turn('turn.done', 'user', 'caller-2', question)
+            await voice.on_data(delegation([question], item_id='request-2', turn_id='caller-2'))
+            await wait_until(lambda: len(appended) == 2)
+            assert (appended[1]['delegation_item_id'], appended[1]['channel']) == ('request-2', 'speakable')
+            await acknowledge(voice, 'request-2')
+            await turn('turn.created', 'assistant', 'small-talk')
+            await feed_output(voice, remote, 2500)
+            await turn('turn.done', 'assistant', 'small-talk', 'Baik, aku di sini.')
+            assert audio_messages(sent) == [
+                adapter.audio_envelope(struct.pack('<h', value) * 480) for value in (1500, 2500)
+            ]
+            assert DM_ADMISSION_ID not in voice.call_work
+
+            await voice.on_data(launch)
+            release_submission.set()
+            await wait_until(lambda: len(appended) == 3)
+            assert (appended[2]['delegation_item_id'], appended[2]['channel']) == ('request-1', 'commentary')
+            assert 'menunggu giliran' in appended[2]['content'][0]['text']
+            await acknowledge(voice, 'request-1')
+            assert voice.call_work == {DM_ADMISSION_ID}
+            assert routes == [request, question]
+            assert submissions == [(request, ACTIVE_WHATSAPP_SESSION)]
         finally:
             await voice.close()
 
