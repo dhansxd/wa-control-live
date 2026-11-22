@@ -1,0 +1,12 @@
+{
+  "dm_mode": "allowlist",
+  "dm_allowlist": ["15550100100"],
+  "group_mode": "off",
+  "require_mention": true,
+  "instructions": "Answer in the sender's language using only the information in this conversation.",
+  "history_limit": 20,
+  "handoff_seconds": 3600,
+  "image_enabled": false,
+  "voice_enabled": false,
+  "reply_mode": "text"
+}

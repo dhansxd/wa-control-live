@@ -1,0 +1,26 @@
+# Private runtime state and local environments.
+.DS_Store
+.private/
+.venv/
+.build/
+node_modules/
+.pytest_cache/
+__pycache__/
+runs/
+target/
+bin/
+identity.local.json
+.env
+.env.*
+*.log
+*.sqlite*
+*.db*
+
+# Local evidence, recordings, archives, and generated test reports.
+/spikes/*/*.json
+/spikes/*/*.wav
+/spikes/*/*.mp3
+/spikes/*/*.png
+*.zip
+*.tar.gz
+*.xml

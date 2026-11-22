@@ -1,0 +1,33 @@
+name: wa-control-live
+label: "WA Control & Live"
+kind: standalone
+version: "0.1.0"
+manifest_version: 2
+api_version: 1
+description: >
+  Control linked WhatsApp accounts, answer chats with a configurable chatbot,
+  and use voice calls on the Hermes bot's active WhatsApp conversation.
+tags: [whatsapp, voice, calls, chatbot]
+platforms: [macos]
+requires_hermes: ">=0.22.7"
+requires_auth: [openai-codex]
+provides_tools: [whatsapp_call_now, whatsapp_live_provider, whatsapp_control]
+provides_hooks: [pre_llm_call, post_gateway_admission, on_session_reset]
+provides_middleware: [tool_execution]
+config_schema:
+  live_enabled:
+    type: bool
+    default: true
+    description: Enable calls when a Live audio provider is set up.
+  unified_gateway:
+    type: bool
+    default: false
+    description: Route the Hermes WhatsApp owner DM through the unified Rust transport.
+  owner_number:
+    type: str
+    default: ""
+    description: Owner's WhatsApp number in the unified Hermes profile.
+  bot_number:
+    type: str
+    default: ""
+    description: Hermes bot number to verify on the unified WhatsApp pairing.

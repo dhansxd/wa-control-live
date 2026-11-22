@@ -1,0 +1,11 @@
+.private/
+identity.local.json
+__pycache__/
+.pytest_cache/
+bin/
+source/*
+!source/hermes-wa-voice-opus-media-1/
+source/hermes-wa-voice-opus-media-1/release-checksums.txt
+upstream-*.tar.gz
+local-tests.xml
+regression-tests.xml
