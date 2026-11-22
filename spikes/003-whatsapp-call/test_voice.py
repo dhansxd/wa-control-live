@@ -127,11 +127,12 @@ def test_phone_identity_and_language_reach_initial_developer_context(tmp_path, m
     assert 'Ikuti bahasa dan alur percakapan pemilik akun dengan wajar.' in identity
     assert 'hangat dan ekspresif sesuai suasana obrolan' in identity
     assert 'apa yang sedang kamu kerjakan dengan sudut pandang orang pertama' in identity
-    assert 'panggilan WhatsApp yang sedang tersambung' in identity
+    assert identity.startswith('Kamu adalah Hermes Agent.\n\n')
+    assert 'Lanjutkan percakapan DM WhatsApp dengan pemilik akun lewat telepon ini.' in identity
+    assert 'Minta persetujuan atau penjelasan hanya jika pekerjaan memang membutuhkannya.' in identity
     assert 'pesan suara yang dikirim ke DM' in identity
     assert identity == params['prompt']
     assert 'Untrusted facade persona' not in params['prompt']
-    assert 'Hermes' not in params['prompt']
     assert 'coba tugas catatan uji' not in params['prompt'].lower()
     assert params['includeStartupContext'] is False
 
@@ -234,6 +235,7 @@ def test_phone_loads_bound_chat_and_keeps_opening_on_topic(tmp_path, monkeypatch
     opening = identity['text']
     assert opening.startswith('Namaku Nara di chat.\n\n')
     assert adapter.FALLBACK_PERSONA not in opening
+    assert 'Gunakan identitas dan cara bicaramu yang sama seperti di DM.' in opening
     assert 'Ikuti bahasa dan alur percakapan pemilik akun dengan wajar.' in opening
     assert 'Gunakan konteks percakapan bersama, termasuk DM, saat relevan.' in opening
     assert 'Biarkan pemilik akun menentukan topik pembuka.' in opening
