@@ -33,9 +33,11 @@ Contoh permintaan dari root repo:
   Baileys lulus. Regresi Python dan Baileys dijalankan ulang pada snapshot
   publik. Rincian hasil dan batas verifikasi tercatat di [STATUS.md](STATUS.md#hasil-verifikasi).
 - Instalasi publik, registrasi perintah setup, disable, enable, dan remove
-  diverifikasi di profil Hermes v0.23.1 sementara. Build sidecar release dari
-  clone bersih, wizard lengkap dengan perangkat tertaut, dan panggilan dengan
-  provider nyata masih perlu diuji pada kandidat rilis.
+  diverifikasi di profil Hermes v0.23.1 sementara. Kandidat berikutnya
+  berhasil membangun sidecar release arm64 dan menjalankan regresi
+  terhadap Hermes v0.23.2. Wizard mendeteksi bot yang sudah dipairing di
+  Hermes dan QR Control menolak nomor bot. Scan perangkat nyata dan
+  panggilan dengan provider nyata masih perlu diuji.
 - Tiga perbaikan yang sudah memiliki regresi lokal adalah kelanjutan akun
   sehat saat lookup semua kontak gagal di akun lain, deduplikasi DM saat
   provider berpindah, dan satu klip lokal saat pemulihan audio berlangsung lama.

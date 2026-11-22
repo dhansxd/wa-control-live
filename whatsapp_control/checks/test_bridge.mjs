@@ -23,13 +23,14 @@ const savedLidOnly = '4022@lid';
 const legacy = '15550100107@s.whatsapp.net';
 const group = '12000000000@g.us';
 const other = '12000000001@g.us';
+const fixtureIdentity = JSON.parse(process.env.WA_FIXTURE_OWN_IDENTITY || 'null');
 let sockets = 0;
 let stanzas = 0;
 export default function makeSocket({auth}) {
   const ev = new EventEmitter();
   const ws = new EventEmitter();
   const index = ++sockets;
-  const user = auth.creds.me ?? {id: index === 2 ? second : first};
+  const user = auth.creds.me ?? fixtureIdentity ?? {id: index === 2 ? second : first};
   const image = {url:'https://example.invalid/image', caption:'original photo'};
   const message = (remoteJid,id,content) => ({key:{remoteJid,id}, message:content, messageTimestamp:1});
   function end() { ev.emit('connection.update',{connection:'close'}); }
@@ -181,6 +182,61 @@ const monoOpus = Buffer.from(
   'T3B1c1RhZ3MMAAAATGF2ZjYzLjEuMTAyAQAAABwAAABlbmNvZGVyPUxhdmM2My4xLjEwMiBsaWJvcHVzT2dnUwAEeAwAAAAA' +
   'AACE1o34AgAAAGAIrhsEAwMDA/j//vj//vj//g==', 'base64',
 );
+
+test('extra Control QR rejects the bot before saving credentials and can be retried', { timeout: 20000 }, async (t) => {
+  const temp = await mkdtemp(path.join(tmpdir(), 'wa-pair-bot-test-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const live = bridge(temp);
+  const args = { reserved_bot_number: '15550100101' };
+  try {
+    const refused = await live.request('pair', 'personal', args);
+    assert.equal(refused.code, 'reserved_bot');
+    assert.match(refused.error, /bot pairing QR/);
+    assert.equal((await live.request('status', 'personal')).result.status, 'unpaired');
+    const database = new DatabaseSync(path.join(temp, 'transport.sqlite3'), { readOnly: true });
+    try {
+      assert.equal(database.prepare('SELECT count(*) AS records FROM auth WHERE account = ?').get('personal').records, 0);
+    } finally {
+      database.close();
+    }
+    assert.equal(live.events.some((event) => event.account === 'personal' && event.status === 'connected'), false);
+    const paired = await live.request('pair', 'personal', args);
+    assert.equal(paired.result.identity.phone, '15550100102@s.whatsapp.net');
+    await live.request('disconnect', 'personal');
+    const repair = await live.request('repair', 'personal', { ...args, identity: paired.result.identity });
+    assert.equal(repair.code, 'reserved_bot');
+    assert.equal((await live.request('status', 'personal')).result.identity.phone, paired.result.identity.phone);
+  } finally {
+    await live.close();
+  }
+});
+
+test('extra Control QR requires authenticated phone evidence for LID accounts', { timeout: 20000 }, async (t) => {
+  const args = { reserved_bot_number: '15550100101' };
+  const cases = [
+    [{ id: '15550100101:7@s.whatsapp.net', phoneNumber: '15550100102@s.whatsapp.net' }, 'reserved_bot'],
+    [{ id: '4021@lid', phoneNumber: '15550100101:7@s.whatsapp.net' }, 'reserved_bot'],
+    [{ id: '4021@lid' }, 'identity_unavailable'],
+    [{ id: '15550100102@s.whatsapp.net', phoneNumber: '15550100103@s.whatsapp.net' }, 'identity_unavailable'],
+    [{ id: '4021@lid', phoneNumber: '15550100102@s.whatsapp.net' }, null],
+  ];
+  for (const [user, code] of cases) {
+    const temp = await mkdtemp(path.join(tmpdir(), 'wa-pair-lid-test-'));
+    t.after(() => rm(temp, { recursive: true, force: true }));
+    const live = bridge(temp, { ...process.env, WA_FIXTURE_OWN_IDENTITY: JSON.stringify(user) });
+    try {
+      const paired = await live.request('pair', 'personal', args);
+      if (code) {
+        assert.equal(paired.code, code);
+        assert.equal((await live.request('status', 'personal')).result.status, 'unpaired');
+      } else {
+        assert.equal(paired.result.identity.phone, '15550100102@s.whatsapp.net');
+      }
+    } finally {
+      await live.close();
+    }
+  }
+});
 
 test('contact roster distinguishes saved names from history and empty upserts', { timeout: 20000 }, async (t) => {
   const temp = await mkdtemp(path.join(tmpdir(), 'wa-contacts-test-'));

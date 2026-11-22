@@ -319,6 +319,26 @@ class OwnerTest(unittest.TestCase):
 
 
 class ServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_extra_account_qr_uses_only_the_configured_bot_identity(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        service = Service(root, None, lambda: True)
+        self.addCleanup(service.ledger.close)
+        self.addCleanup(service.bot.close)
+        service.bridge.call = AsyncMock()
+        await service.transport("pair", "personal")
+        service.bridge.call.assert_awaited_once_with("pair", "personal", None)
+
+        service.rust = SimpleNamespace(account="bot", bot="15550100101", call=AsyncMock())
+        service.bridge.call.reset_mock()
+        await service.transport("pair", "personal", {"reserved_bot_number": "15550100102"})
+        service.bridge.call.assert_awaited_once_with("pair", "personal", {"reserved_bot_number": service.rust.bot})
+        identity = {"phone": "15550100102@s.whatsapp.net"}
+        await service.transport("repair", "personal", {"identity": identity})
+        service.bridge.call.assert_awaited_with("repair", "personal", {"identity": identity,
+                                                                     "reserved_bot_number": service.rust.bot})
+        await service.transport("pair", "bot")
+        service.rust.call.assert_awaited_once_with("pair", {})
+
     async def test_status_reports_only_sanitized_chatbot_model_outage(self):
         with tempfile.TemporaryDirectory() as directory:
             llm = SimpleNamespace(acomplete_structured=AsyncMock())

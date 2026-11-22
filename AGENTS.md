@@ -16,9 +16,12 @@ arahan terbaru pemilik, perbarui aturan dan kriteria penerimaannya.
   pemilik menelepon Hermes di nomor bot. Chatbot tamu tetap opsional dan
   terpisah dari kendali pemilik.
 - Satu penautan akun bot Hermes melayani Control, DM pemilik, dan telepon.
-  Hanya akun bot memakai Live. Akun Control tambahan ditautkan sesuai pilihan
-  pengguna. Dua akun atau lima belas key dalam contoh adalah skenario uji,
-  sehingga angka contoh tidak menjadi batas produk.
+  Deteksi identitas bot dari pairing WhatsApp Hermes yang ada dan cocokkan
+  dengan hasil scan Live. Ambil identitas akun Control tambahan dari scan
+  QR. Tolak akun bot pada QR Control tambahan. Izin menelepon dan DM pemilik
+  dipilih secara terpisah dari identitas akun Control yang ditautkan.
+  Dua akun atau lima belas key dalam contoh adalah skenario uji, sehingga
+  angka contoh tidak menjadi batas produk.
 - Pakai percakapan WhatsApp Hermes yang sedang aktif untuk DM, audio,
   lampiran, transkrip, dan pekerjaan. Cocokkan [perilaku yang bisa dialami
   pemilik di ChatGPT Live Desktop](PLAN.md#acuan-perilaku-telepon) dalam

@@ -12,11 +12,14 @@ akun dari terminal, memilih cara login dan provider yang tersedia bagi mereka,
 lalu mengatur WhatsApp dan audio Live dari Hermes.
 
 - **A adalah nomor bot Hermes.** Satu koneksi Rust untuk akun A melayani DM
-  pemilik, Control, dan telepon Live. Penautan A untuk plugin memakai perangkat
-  tertaut plugin ini. Satu penautan A berlaku untuk ketiga fungsi tersebut.
+  pemilik, Control, dan telepon Live. Wizard mendeteksi A dari pairing
+  WhatsApp Hermes bila sudah ada. Penautan plugin memverifikasi akun yang
+  memindai QR Live cocok dengan A. Satu penautan A berlaku untuk ketiga fungsi.
 - **B adalah nomor pribadi yang dipakai pemilik untuk menghubungi A.** Pemilik
   bisa menautkan B secara terpisah untuk mengontrol akun pribadinya. B juga bisa
-  tetap dipakai hanya untuk menghubungi A. Akun Control tambahan memakai Baileys.
+  tetap dipakai hanya untuk menghubungi A. Akun Control tambahan memakai Baileys
+  dan identitas diambil dari hasil scan. Cegah A masuk sebagai akun tambahan
+  dan minta konfirmasi sebelum memberikan izin Live atau DM pemilik.
 - Pemilik bisa memilih A, B, beberapa akun, atau semua akun yang dikelola.
   Nomor B dan akun tambahan tidak perlu ikut ditautkan untuk menggunakan Live
   pada A. Jumlah akun mengikuti akun yang ditautkan dan kemampuan WhatsApp.

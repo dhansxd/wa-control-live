@@ -71,6 +71,10 @@ def wizard(monkeypatch, tmp_path):
         launcher.verify_paired_identity(config)
         (private / "paired.json").touch()
 
+    def no_stock_identity(*_args):
+        raise module.StockBotNotPaired()
+
+    monkeypatch.setattr(module, "resolve_setup_identity", no_stock_identity)
     monkeypatch.setattr(module, "build_sidecar", build_sidecar)
     monkeypatch.setattr(module, "prepare_control", lambda _path: None)
     monkeypatch.setattr(module, "_profile_env", lambda _owner, pending: (pending, secrets.__setitem__))
@@ -109,7 +113,7 @@ def test_bare_setup_dispatches_to_wizard(wizard, monkeypatch):
 def test_fresh_setup_builds_and_links_bot_with_optional_live_deferred(wizard, monkeypatch):
     monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (None, {}))
 
-    _setup(wizard, [f"+{OWNER}", f"+{BOT}", "personal", ""])
+    _setup(wizard, [f"+{BOT}", f"+{OWNER}", "personal", ""])
 
     assert wizard.builds == [wizard.state]
     assert wizard.links == [BOT]
@@ -129,7 +133,7 @@ def test_fresh_setup_builds_and_links_bot_with_optional_live_deferred(wizard, mo
     assert wizard.links == [BOT]
 
     with pytest.raises(ValueError, match="already linked to another bot"):
-        _setup(wizard, ["", OTHER])
+        _setup(wizard, [OTHER])
     assert wizard.settings["bot_number"] == BOT
     assert wizard.links == [BOT]
 
@@ -142,7 +146,7 @@ def test_wrong_pairing_keeps_setup_unpublished_then_retry_saves_live_secret(wiza
     monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (live, {SECRET_NAME: SECRET}))
     wizard.scanned[0] = OTHER
     with pytest.raises(RuntimeError, match="mismatched"):
-        _setup(wizard, [OWNER, BOT, "", ""])
+        _setup(wizard, [BOT, OWNER, "", ""])
 
     assert not wizard.settings.get("unified_gateway")
     assert "live" not in wizard.settings
@@ -150,13 +154,53 @@ def test_wrong_pairing_keeps_setup_unpublished_then_retry_saves_live_secret(wiza
     assert not (wizard.state / "paired.json").exists()
 
     wizard.scanned[0] = BOT
-    _setup(wizard, [OWNER, BOT, "", ""])
+    _setup(wizard, [BOT, OWNER, "", ""])
 
     assert wizard.settings["live"] == live
     assert wizard.settings["live_enabled"] is True
     assert wizard.secrets[SECRET_NAME] == SECRET
     assert SECRET not in repr(wizard.settings)
     assert SECRET not in "\n".join(wizard.messages)
+
+
+def test_stock_setup_uses_detected_bot_and_confirms_owner_with_prebuilt_sidecar(wizard, monkeypatch, tmp_path):
+    seen = []
+
+    def detect(home, source):
+        seen.append((home, source))
+        return BOT, OWNER
+
+    monkeypatch.setattr(wizard.module, "resolve_setup_identity", detect)
+    monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (None, {}))
+    sidecar = tmp_path / "prepared-sidecar"
+    sidecar.write_bytes(b"test arm64 sidecar")
+    answers = iter(["y", "personal", "n"])
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    wizard.module.run_setup(
+        wizard.ctx, wizard.home, wizard.launcher, stock_profile="default", sidecar=sidecar,
+        sidecar_sha256=wizard.module.hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        ask=ask, tell=wizard.messages.append,
+    )
+    assert seen == [(wizard.home, "default")]
+    assert wizard.settings["bot_number"] == BOT
+    assert wizard.settings["owner_number"] == OWNER
+    assert wizard.links == wizard.builds == []
+    assert "as Live caller and DM owner?" in prompts[0]
+    assert not any("number (with country code)" in prompt for prompt in prompts)
+
+
+def test_stock_setup_requires_owner_approval_separately_from_pairing(wizard, monkeypatch):
+    monkeypatch.setattr(wizard.module, "resolve_setup_identity", lambda *_: (BOT, OWNER))
+    monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (None, {}))
+    _setup(wizard, ["n", OTHER, "", "n"])
+    assert wizard.settings["bot_number"] == BOT
+    assert wizard.settings["owner_number"] == OTHER
+    assert wizard.links == []
 
 
 @pytest.mark.parametrize("reuse", [False, True])

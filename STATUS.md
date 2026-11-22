@@ -9,7 +9,7 @@ Untuk melanjutkan pengembangan, buka [handoff](HANDOFF.md),
 
 | Area | Implementasi dan cakupan uji lokal |
 | --- | --- |
-| Plugin gabungan | Satu manifest Hermes. Koneksi Rust akun bot A melayani Control, DM pemilik, dan telepon. Akun B atau akun tambahan dapat ditautkan untuk Control melalui Baileys. |
+| Plugin gabungan | Satu manifest Hermes. Koneksi Rust akun bot A melayani Control, DM pemilik, dan telepon. Wizard mendeteksi A dari pairing Hermes yang ada. Baileys mengenali akun Control tambahan dari QR dan menolak A sebelum menyimpan sesi. |
 | Control | Pesan, file, forwarding, Status, grup, pemilihan akun dan tujuan, serta hasil per tujuan. Uji wildcard mencakup akun yang daftar kontaknya kosong atau gagal dibaca, kelanjutan akun lain, dan retry sesuai daftar penerima awal. |
 | Chatbot tamu | Kebijakan DM dan grup per akun, mention, riwayat chat terisolasi, gambar dan voice note sesuai konfigurasi media, dan handoff ke pemilik. Saat model bermasalah, status per akun dan satu pemberitahuan per chat yang memenuhi aturan sudah diuji lokal. |
 | Percakapan Live | DM, audio, transkrip, dan pekerjaan mengikuti sesi WhatsApp Hermes yang aktif. Penutupan menyimpan ucapan terakhir yang sudah final walaupun belum dijawab. Provider pengganti menerima transkrip yang selesai selama persiapan, dengan deduplikasi terhadap snapshot. |
@@ -45,6 +45,14 @@ kejadian interupsi yang berulang atau terlambat, serta audio baru yang datang
 sebelum event giliran asisten. Lingkungan ini belum punya akun WA Control &
 Live uji yang tertaut untuk membandingkan jeda di perangkat dengan Desktop.
 
+Kandidat deteksi dan pairing lulus **694 tes Python, 15 subtes, dan 7 tes
+bridge Baileys** dengan sumber Hermes v0.23.2 dan Python 3.12 terisolasi.
+Tes mencakup deteksi bot tanpa izin DM lama, konfirmasi izin pemilik,
+penolakan bot pada QR Control, dan pengulangan pairing tanpa mengganti
+identitas tersimpan. Build release arm64 dengan `cargo build --locked`
+berhasil dan lolos pemeriksaan versi lokal. Scan QR dan panggilan dengan
+perangkat nyata masih terbuka.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak
@@ -76,8 +84,8 @@ oleh antrean Hermes ketika media panggilan ditutup.
 
 ## Masih perlu dibuktikan
 
-- Build sidecar release dari clone bersih, wizard dengan perangkat nyata,
-  serta siklus update dan purge dengan layanan tertaut pada kandidat rilis.
+- Wizard dengan perangkat nyata serta siklus update dan purge dengan
+  layanan tertaut pada kandidat rilis.
 - Control akun A dan akun tambahan yang berjalan bersamaan, visibilitas Status
   serta audiens di perangkat penerima, izin admin grup, dan chatbot dengan
   media serta handoff pada akun nyata.

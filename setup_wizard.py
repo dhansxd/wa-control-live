@@ -1,10 +1,12 @@
 """Guide first-time setup in the active Hermes profile."""
 
+from contextlib import nullcontext
 import hashlib
 import json
 import os
 import shlex
 
+from .plugin_identity import StockBotNotPaired, resolve_setup_identity
 from .setup_live import choose_live
 from .setup_sidecar import build_sidecar, source_checksum
 from .whatsapp_control.cli import prepare as prepare_control
@@ -15,7 +17,7 @@ def _phone(ask, label, current):
     prompt = f"{label} [{current}]: " if current else f"{label} (with country code): "
     value = ask(prompt).strip() or current
     number = phone_number(value)
-    if len(number) < 7:
+    if not 7 <= len(number) <= 15:
         raise ValueError("Enter each WhatsApp number in full international format.")
     return number
 
@@ -37,7 +39,8 @@ def _profile_env(owner, secrets):
     return values, save_env_value
 
 
-def run_setup(ctx, home, launcher, *, ask=input, tell=print):
+def run_setup(ctx, home, launcher, *, stock_profile=None, sidecar=None, sidecar_sha256=None,
+              ask=input, tell=print):
     from . import STAGE, _setup
 
     state = ctx.state.data_dir / "unified"
@@ -46,12 +49,29 @@ def run_setup(ctx, home, launcher, *, ask=input, tell=print):
     old_owner = ctx.get_config("owner_number", default="") or current.get("owner_number", "")
     old_bot = ctx.get_config("bot_number", default="") or current.get("bot_number", "")
     tell(f"Set up WA Control & Live in Hermes profile: {home}")
-    owner = _phone(ask, "Owner WhatsApp number", old_owner)
-    bot = _phone(ask, "Hermes bot WhatsApp number", old_bot)
-    if owner == bot:
-        raise ValueError("The owner and Hermes bot must be different WhatsApp numbers.")
+    try:
+        bot, suggested_owner = resolve_setup_identity(home, stock_profile)
+        tell("Detected the bot from the existing Hermes WhatsApp pairing.")
+    except StockBotNotPaired:
+        if stock_profile is not None:
+            raise
+        bot, suggested_owner = None, None
+    if not bot:
+        bot = _phone(ask, "Hermes bot WhatsApp number", old_bot)
     if paired and bot != current.get("bot_number"):
         raise ValueError("This profile is already linked to another bot. Use a different Hermes profile or unlink it first.")
+    owner = None
+    if not old_owner and suggested_owner:
+        answer = ask(
+            f"Authorize the existing WhatsApp contact ending in {suggested_owner[-4:]} "
+            "as Live caller and DM owner? [y/N]: "
+        )
+        if answer.strip().lower() in {"y", "yes"}:
+            owner = suggested_owner
+    if owner is None:
+        owner = _phone(ask, "Authorized Live caller and DM owner", old_owner)
+    if owner == bot:
+        raise ValueError("The owner and Hermes bot must be different WhatsApp numbers.")
 
     settings, secrets = choose_live(ctx, ask=ask, tell=tell)
     labels = ask("Additional Control account labels to link after setup (comma-separated, Enter to skip): ")
@@ -76,19 +96,20 @@ def run_setup(ctx, home, launcher, *, ask=input, tell=print):
     reusable = (read_json(build_record) == {"source": source_sha, "binary": checksum}
                 and checksum and binary.is_file() and os.access(binary, os.X_OK) and python.is_file()
                 and os.access(python, os.X_OK) and hashlib.sha256(binary.read_bytes()).hexdigest() == checksum)
-    if reusable:
+    if reusable and sidecar is None:
         tell("Using the sidecar already prepared for this profile.")
     else:
-        with build_sidecar(source, state=state) as sidecar:
+        asset = nullcontext(sidecar) if sidecar is not None else build_sidecar(source, state=state)
+        with asset as prepared_sidecar:
             if source_checksum(source) != source_sha:
                 raise RuntimeError("The installed plugin source changed during setup. Run setup again.")
-            checksum = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+            checksum = sidecar_sha256 or hashlib.sha256(prepared_sidecar.read_bytes()).hexdigest()
             allowed = launcher.profile_sidecar_checksums(state, True, checksum)
-            _setup(launcher, state, sidecar, binary, python, allowed, require_codex=False)
+            _setup(launcher, state, prepared_sidecar, binary, python, allowed, require_codex=False)
 
     config = launcher.prepare_profile(owner=owner, bot=bot, private=state, binary=binary, python=python,
                                       hermes_home=home, unified_gateway=True, sidecar_sha256=checksum)
-    if not reusable:
+    if not reusable or sidecar is not None:
         write_json(build_record, {"source": source_sha, "binary": checksum})
     if paired:
         launcher.verify_paired_identity(config)

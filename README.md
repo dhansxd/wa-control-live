@@ -27,10 +27,18 @@ hermes plugins install dhansxd/wa-control-live --enable
 hermes wa-control-live setup
 ```
 
-Wizard meminta nomor pemilik dan nomor bot dalam format internasional,
-menambahkan pemilik ke izin DM WhatsApp profil tersebut, lalu menawarkan
-penautan bot dari terminal. Pindai QR menggunakan **Perangkat Tertaut** pada
-akun bot. Jika penautan ditunda, jalankan `hermes wa-control-live pair`.
+Wizard mendeteksi nomor bot dari pairing WhatsApp bawaan Hermes yang ada.
+Untuk mengambil identitas bot dari profil Hermes lain, misalnya profil
+`default`, jalankan `hermes -p PROFIL_UJI wa-control-live setup --stock-profile default`.
+Wizard membaca identitas yang sudah tertaut dan menyiapkan perangkat tertaut
+baru untuk plugin. Jika profil baru belum punya bot terpasang, wizard
+meminta nomor bot untuk diverifikasi saat scan.
+
+Konfirmasi kontak yang akan diberi izin DM dan menelepon bot. Wizard bisa
+menawarkan kontak dari konfigurasi WhatsApp lama dan meminta konfirmasi
+sebelum memberinya akses di profil tujuan. Pindai QR Live menggunakan
+**Perangkat Tertaut** pada akun bot yang terdeteksi. Jika penautan ditunda,
+jalankan `hermes wa-control-live pair`.
 
 Jalankan layanan plugin di satu terminal dan gateway di terminal lain.
 
@@ -43,6 +51,11 @@ Untuk gateway yang sudah dikelola sebagai layanan, muat ulang dengan
 `hermes gateway restart`. Gunakan `hermes -p NAMA_PROFIL` pada setiap perintah
 untuk memilih profil yang sama. Sesudah gateway siap, kirim DM dari nomor
 pemilik ke bot. [Panduan gateway Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)
+
+Saat layanan plugin berjalan, gunakan `hermes whatsapp-control pair pribadi`
+untuk akun tambahan. Identitas akun diambil dari WhatsApp saat QR dipindai.
+Label `pribadi` dapat diganti. Jika akun yang memindai adalah bot yang
+terdeteksi, penautan Control ditolak dan QR Live tetap dipakai untuk bot.
 
 Untuk audio Live, pakai login atau secret Hermes yang kompatibel, pilih
 provider dan kredensial secara manual, atau tunda penyiapannya sambil memakai

@@ -224,6 +224,7 @@ function normalized(value, fallback = '') {
 
 const phoneJid = /^\d{1,24}(?:-\d{1,24})?@s\.whatsapp\.net$/;
 const lidJid = /^\d{1,24}(?:-\d{1,24})?@lid$/;
+const accountPhoneJid = /^[1-9]\d{5,14}@s\.whatsapp\.net$/;
 
 function jid(value, domain) {
   const id = typeof value === 'string' && /^\d{5,20}$/.test(value)
@@ -486,7 +487,24 @@ function openSocket(entry) {
       qrcode.generate(qr, { small: true }, (terminal) => output({ event: 'qr', account: entry.account, terminal }));
     }
     if (connection === 'open') {
+      if (entry.loggingOut) return;
       const connected = identity(socket.user ?? auth.creds.me);
+      if (entry.stagedAuth && entry.reservedPhone) {
+        const phones = new Set([connected?.id, connected?.phone].filter((id) => accountPhoneJid.test(id)));
+        if (phones.has(entry.reservedPhone)) {
+          rejectPairing(entry, socket, connectionError(
+            'This is the Hermes bot account. Use the WA Control & Live bot pairing QR.', 'reserved_bot',
+          ));
+          return;
+        }
+        if (phones.size !== 1) {
+          rejectPairing(entry, socket, connectionError(
+            'WhatsApp did not provide one verified phone identity for this account. Scan the QR again from the intended account.',
+            'identity_unavailable',
+          ));
+          return;
+        }
+      }
       if (!connected?.id) {
         publishStatus(entry, 'disconnected', 'identity_unavailable');
         closeEntry(entry, connectionError('WhatsApp did not provide the paired account identity', 'identity_unavailable'));
@@ -551,7 +569,7 @@ function openSocket(entry) {
   });
 }
 
-async function connect(account, pairing = false, expectedIds = null, expectedPhone = null) {
+async function connect(account, { pairing = false, expectedIds = null, expectedPhone = null, reservedPhone = null } = {}) {
   const current = sockets.get(account);
   if (current?.status === 'connected') return accountStatus(current);
   if (current) return current.ready ?? accountStatus(current);
@@ -560,7 +578,7 @@ async function connect(account, pairing = false, expectedIds = null, expectedPho
   const entry = {
     account, status: 'connecting', identity: identity(saved?.me), pairing,
     recentMessages: new Map(), socket: null, failures: 0,
-    stagedAuth: pairing ? new Map() : null, expectedIds, expectedPhone,
+    stagedAuth: pairing ? new Map() : null, expectedIds, expectedPhone, reservedPhone,
   };
   sockets.set(account, entry);
   const ready = new Promise((resolve, reject) => { entry.pending = { resolve, reject }; });
@@ -868,15 +886,23 @@ async function execute({ op, account, args = {} }) {
   if (typeof account !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(account)) {
     throw new Error('Invalid account identifier');
   }
-  if (op === 'pair' || op === 'connect') return connect(account, op === 'pair');
-  if (op === 'repair') {
+  if (op === 'connect') return connect(account);
+  if (op === 'pair' || op === 'repair') {
+    let reservedPhone = null;
+    if (args.reserved_bot_number !== undefined) {
+      reservedPhone = `${args.reserved_bot_number}@s.whatsapp.net`;
+      if (typeof args.reserved_bot_number !== 'string' || !accountPhoneJid.test(reservedPhone)) {
+        throw connectionError('The configured Hermes bot phone identity is invalid.', 'identity_unavailable');
+      }
+    }
+    if (op === 'pair') return connect(account, { pairing: true, reservedPhone });
     const current = sockets.get(account);
     if (current?.status === 'connected') throw new Error('Disconnect the current WhatsApp device before pairing again');
     const saved = identity(decode(getKey.get(account, 'creds', 'current'))?.me);
     const expectedIds = identityIds(saved, args.identity);
     if (!expectedIds.size) throw new Error('Unable to verify the original WhatsApp identity');
     if (current) closeEntry(current, connectionError('WhatsApp connection replaced by pairing', 'offline'));
-    return connect(account, true, expectedIds, saved?.phone || args.identity?.phone);
+    return connect(account, { pairing: true, expectedIds, expectedPhone: saved?.phone || args.identity?.phone, reservedPhone });
   }
   if (op === 'send_result') return sendResult(account, wireId(args.message_id));
   if (op === 'group_create_result') return groupCreationResult(account, wireId(args.request_id));
@@ -1059,7 +1085,7 @@ const exposedErrors = new Set([
 ]);
 const publicCodes = new Set([
   'offline', 'unpaired', 'timeout', 'connection_failed', 'session_unavailable', 'identity_unavailable',
-  'unknown', 'rejected', 'identity_mismatch', 'profile_mismatch',
+  'unknown', 'rejected', 'identity_mismatch', 'profile_mismatch', 'reserved_bot',
 ]);
 const groupWrites = new Set(['group_create', 'group_members', 'group_settings']);
 const definitiveGroupRefusals = new Set([400, 401, 403, 404, 405, 406, 409, 413, 415, 429]);

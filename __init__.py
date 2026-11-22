@@ -29,7 +29,8 @@ def _launcher():
 def _parser(parser):
     commands = parser.add_subparsers(dest="action", required=True)
     setup = commands.add_parser("setup", help="Guide setup for the current Hermes profile")
-    setup.add_argument("--sidecar", type=Path, help="Use a prepared macOS arm64 sidecar instead of the wizard")
+    setup.add_argument("--stock-profile", help="Detect the bot from another Hermes profile's WhatsApp pairing")
+    setup.add_argument("--sidecar", type=Path, help="Use a prepared macOS arm64 sidecar")
     setup.add_argument("--sidecar-sha256", help="Expected SHA-256 for a local unified sidecar build")
     setup.add_argument("--reuse-pairing-from", type=Path, help="Private state of a stopped voice launcher")
     commands.add_parser("status", help="Check voice pairing and service status")
@@ -305,15 +306,23 @@ def _run(ctx, args):
         _require_control_ownership()
         cleanup(runtime_path(home), args.purge, cleanup_runtime=partial(_cleanup_live_runtime, ctx))
         return
-    if args.action == "setup" and args.sidecar is None:
-        if args.sidecar_sha256 or args.reuse_pairing_from:
-            raise ValueError("--sidecar-sha256 and --reuse-pairing-from require --sidecar.")
+    if args.action == "setup" and (args.sidecar is None or args.stock_profile is not None):
+        if args.sidecar is None and args.sidecar_sha256:
+            raise ValueError("--sidecar-sha256 requires --sidecar.")
+        if args.reuse_pairing_from:
+            raise ValueError("Interactive setup links its own device. --reuse-pairing-from is only for manual setup.")
+        if args.sidecar is not None and not args.sidecar_sha256:
+            raise ValueError("Pass --sidecar-sha256 for the candidate unified build.")
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise RuntimeError("Run setup in an interactive terminal, or pass --sidecar for manual setup.")
         from .setup_wizard import run_setup
 
+        setup_options = {}
+        if args.stock_profile is not None:
+            setup_options.update(stock_profile=args.stock_profile, sidecar=args.sidecar,
+                                 sidecar_sha256=args.sidecar_sha256)
         try:
-            run_setup(ctx, home, _launcher())
+            run_setup(ctx, home, _launcher(), **setup_options)
         except (EOFError, KeyboardInterrupt):
             raise SystemExit("Setup cancelled.") from None
         return
