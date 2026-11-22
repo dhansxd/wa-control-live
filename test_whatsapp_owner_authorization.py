@@ -1,5 +1,5 @@
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 import json
 import os
@@ -117,3 +117,67 @@ def test_send_requires_exact_running_owner_admission(tmp_path, admission_fixture
         viewer_turn.reset(viewer_token)
         executing_admission.reset(execution_token)
         clear_session_vars(event_tokens)
+
+
+@pytest.mark.parametrize(('signature_matches', 'queue_minutes'), [(True, 3), (True, 12), (False, 0)])
+def test_live_callback_registers_one_native_alarm_in_owner_dm(
+        tmp_path, admission_fixture, monkeypatch, signature_matches, queue_minutes):
+    from types import SimpleNamespace
+    from cron.jobs import get_job
+    from gateway.platforms.event import MessageEvent
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from gateway.session_ingress import executing_admission, viewer_turn
+    from hermes_cli.gateway_runtime import gateway_profile_home
+    from hermes_cli.plugins_state import PluginState
+    from hermes_state_runtime import admit_session_input, claim_session_input
+
+    auth, runtime, source, route, db, epoch = admission_fixture
+    outbound = import_module(f'{auth.__package__}.whatsapp_outbound')
+    (runtime / 'config.json').touch()
+    monkeypatch.setattr(outbound, 'resolve_identity', lambda _home: (OWNER, OTHER))
+    monkeypatch.setattr(outbound, '_dial', lambda *_args, **_kwargs: pytest.fail('Unexpected dial during setup'))
+    state = PluginState('wa-control-live-test')
+    ctx = SimpleNamespace(current_cron_execution=lambda: None, state=SimpleNamespace(
+        data_dir=runtime, get=state.get, set=state.set,
+    ))
+
+    text = 'Kerjaan lanjut ya, telepon aku sepuluh menit lagi dan tutup sekarang.'
+    principal = f'uid:{os.getuid()}'
+    signed = auth.record_live_submission(runtime, 'session', NONCE, text if signature_matches else 'Halo.')
+    from live_agent import VOICE_PREFIX, VOICE_REQUEST_TIME
+    spoken_at = datetime.now(timezone.utc) - timedelta(minutes=queue_minutes)
+    context = VOICE_PREFIX + VOICE_REQUEST_TIME + spoken_at.isoformat() + '\n'
+    row = admit_session_input(db, epoch=epoch, principal_id=principal, session_id='session', request_id=signed,
+                              payload={'text': text, 'surface_v1': {'surface': 'voice-live', 'voice_context': context},
+                                       'local_operator_v1': {
+                                  'principal_id': principal, 'profile_id': str(gateway_profile_home(tmp_path)),
+                                  'session_id': 'session'}})
+    assert claim_session_input(db, epoch=epoch, session_id='session')['status'] == 'started'
+    tokens = set_session_vars(
+        platform='whatsapp', chat_type='dm', chat_id=OWNER, user_id=OWNER, session_key=route,
+        session_id='session', message_id=source.message_id, actor_id=OWNER,
+        turn_event=MessageEvent(text=text, source=source, message_id=row['admission_id']),
+    )
+    executing = executing_admission.set(True)
+    viewer = viewer_turn.set(object())
+    try:
+        args = {'schedule': 'in 10m'}
+        alarm = outbound.call_now(ctx, args, session_id='session')
+        if not signature_matches:
+            assert alarm == {'status': 'denied'}
+            assert not state.get('call_alarms', {})
+            return
+        if queue_minutes >= 10:
+            assert alarm['status'] == 'invalid_schedule'
+            assert not state.get('call_alarms', {})
+            return
+        assert alarm['status'] == 'scheduled'
+        assert datetime.fromisoformat(alarm['scheduled_at']) == spoken_at + timedelta(minutes=10)
+        assert outbound.call_now(ctx, args, session_id='session') == alarm
+        assert list(state.get('call_alarms', {})) == [alarm['job_id']]
+        job = get_job(alarm['job_id'])
+        assert job['origin']['chat_id'] == OWNER and job['enabled'] and job['schedule']['kind'] == 'once'
+    finally:
+        viewer_turn.reset(viewer)
+        executing_admission.reset(executing)
+        clear_session_vars(tokens)

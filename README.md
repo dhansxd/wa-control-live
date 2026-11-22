@@ -187,6 +187,10 @@ selama panggilan, sehingga pembicaraan bisa langsung dilanjutkan di DM.
 Untuk pekerjaan yang membutuhkan alat atau data baru, Hermes memakai model,
 provider, dan izin profil itu. Gateway mengirim hasil lengkap dan lampiran
 lewat WhatsApp. Asisten bisa membahas hasilnya di telepon.
+Selama kamu mengobrol, Live menerima progres dari tugas yang sama. Kamu
+bisa bertanya “sudah sampai mana?” atau “bagian kode mana yang berubah?”.
+Rincian mengikuti laporan alat, termasuk kegagalan dan perubahan file yang
+sudah terkonfirmasi.
 Pekerjaan yang sudah diterima gateway dapat berlanjut setelah telepon ditutup.
 Jika sesi DM berganti saat panggilan berlangsung, plugin memulai ulang koneksi
 suara dengan konteks sesi yang baru di panggilan yang sama. Persetujuan atau
@@ -199,6 +203,9 @@ gabungan menyiapkan provider audio sebelum mengirim tawaran panggilan
 WhatsApp. Jika semua pilihan gagal, penyebabnya dilaporkan ke DM tanpa
 membuat dering. Saat kamu mengangkat, koneksi audio yang sudah siap
 melanjutkan sesi DM aktif.
+Kamu juga bisa menjadwalkan satu panggilan balik dari DM atau saat sedang
+menelepon, misalnya “telepon aku besok jam sembilan”. Hermes mengonfirmasi
+waktu setelah jadwal tercatat di cron profil yang sama.
 
 ## Nonaktifkan, perbarui, dan hapus
 

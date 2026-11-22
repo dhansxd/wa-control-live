@@ -37,7 +37,7 @@ class Jobs:
                  'text': 'Pekerjaan yang diterima sebelum perpindahan.'}] if self.submissions else []
         return {'status': 'ready', 'session_id': SESSION, 'history': [], 'work': work}
 
-    async def submit(self, submission_id, text, *, session_id):
+    async def submit(self, submission_id, text, *, session_id, spoken_at_ms=None):
         assert session_id == SESSION
         self.submissions.append((submission_id, text))
         return {'status': 'started',
@@ -48,6 +48,10 @@ class Jobs:
         await self.complete.wait()
         return {'status': 'completed', 'session_id': session_id, 'admission_id': admission_id,
                 'output': RESULT}
+
+    async def save_exchange(self, session_id, exchange, **_):
+        assert session_id == SESSION
+        return {'status': 'saved'}
 
 
 class Connection:
@@ -222,10 +226,20 @@ def test_switch_keeps_one_whatsapp_socket_hermes_session_and_accepted_work(tmp_p
                 assert key == ('codex', 'default')
                 voice = app[STATE]['voice']
                 call_ws = app[STATE]['active']
+                await old.scope.on_data({'type': 'turn.done', 'turn': {
+                    'id': 'original-turn', 'role': 'user', 'transcript': 'Kerjakan ini',
+                }})
+                assert (await ws.receive_json(timeout=2))['serverContent']['inputTranscription']['text'] == 'Kerjakan ini'
                 _, status, admission = await voice.submit_task('original-provider-item', 'original-turn', 'Kerjakan ini')
                 assert (status, admission) == ('started', ADMISSION)
                 voice.watch_dm_work(ADMISSION, None, None)
                 observer = voice.work_followers[ADMISSION][0]
+                voice.update_dm_work((await jobs.prepare_context())['work'])
+                step = {'admission_id': ADMISSION, 'generation': 4, 'tool_name': 'patch',
+                        'tool_id': 'edit', 'seq': 1, 'phase': 'completed', 'detail': 'render.py',
+                        'file_change': {'effect': 'patched', 'files_modified': ['render.py'],
+                                        'code_excerpt': ['only on explicit read']}}
+                await voice.apply_tool_progress(step)
 
                 request = asyncio.create_task(provider_request(client, url, 'gemini'))
                 try:
@@ -233,6 +247,9 @@ def test_switch_keeps_one_whatsapp_socket_hermes_session_and_accepted_work(tmp_p
                     assert key == ('gemini', 'a')
                     await asyncio.wait_for(target.prepared.wait(), 2)
                     assert not request.done()
+                    await voice.apply_tool_progress({**step, 'tool_id': 'tests', 'tool_name': 'terminal',
+                                                     'seq': 2, 'phase': 'failed', 'file_change': None,
+                                                     'finding': 'test_render gagal'})
                     pcm = b'\x20\x01' * 20
                     await target.scope.output_audio(b'\x11\x02' * 20)
                     await old.scope.output_audio(pcm)
@@ -249,6 +266,17 @@ def test_switch_keeps_one_whatsapp_socket_hermes_session_and_accepted_work(tmp_p
                 assert voice.work_followers[ADMISSION][0] is observer and not observer.done()
                 assert ADMISSION in voice.call_work
                 assert any(ADMISSION in item['text'] for item in target.initial_items)
+                assert any('render.py' in item['text'] for item in target.initial_items)
+                work = [{'admission_id': ADMISSION, 'session_id': SESSION, 'status': 'started', 'text': 'video'}]
+                brief = voice.replacement_work_context(work, {ADMISSION: [
+                    {'detail': 'data ' * 1000}, {'tool': 'patch', 'detail': 'render.py'},
+                ]})
+                assert json.loads(brief.removeprefix('Status pekerjaan Hermes: '))[0]['tool_steps'] == [
+                    {'tool': 'patch', 'detail': 'render.py'},
+                ]
+                assert all('only on explicit read' not in item['text'] for item in target.initial_items)
+                assert sum('test_render gagal' in text for text in target.context_updates) == 1
+                assert target.spoken.empty()
                 await asyncio.wait_for(old.closed.wait(), 2)
 
                 await old.scope.output_audio(b'\x44\x02' * 20)
@@ -593,7 +621,7 @@ def test_hermes_realtime_moves_audio_both_ways_over_a_local_webrtc_peer(tmp_path
             assert (current, session_id) == (spoken, SESSION)
             return {'status': 'task', 'work': []}
 
-        async def submit(self, submission_id, text, *, session_id):
+        async def submit(self, submission_id, text, *, session_id, spoken_at_ms=None):
             result = await super().submit(submission_id, text, session_id=session_id)
             return {**result, 'status': 'completed', 'output': RESULT}
 
@@ -736,7 +764,7 @@ def test_switch_to_gpt_live_uses_the_same_whatsapp_and_hermes_session(tmp_path, 
             assert (current, session_id) == (spoken, SESSION)
             return {'status': 'task', 'work': []}
 
-        async def submit(self, submission_id, text, *, session_id):
+        async def submit(self, submission_id, text, *, session_id, spoken_at_ms=None):
             result = await super().submit(submission_id, text, session_id=session_id)
             return {**result, 'status': 'completed', 'output': RESULT}
 

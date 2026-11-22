@@ -295,7 +295,8 @@ def test_close_cancels_pending_handoff_observer_without_replaying(tmp_path, monk
                  'target':'client', 'user_bidi_turn_id':'owner-turn',
                  'content':[{'text':'Buat catatan uji berisi tes suara berhasil'}]}}
 
-        async def native_task(submission_id, request, *, session_id):
+        async def native_task(submission_id, request, *, session_id, spoken_at_ms):
+            assert type(spoken_at_ms) is int
             assert session_id == 'active-whatsapp-dm'
             submitted.append(request)
             entered.set()

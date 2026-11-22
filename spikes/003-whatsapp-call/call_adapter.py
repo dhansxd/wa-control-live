@@ -51,13 +51,17 @@ CALL_PROMPT = (
     'sesuai status yang sudah terkonfirmasi. Sebut pekerjaan selesai atau hasil terkirim hanya jika terbukti. '
     'Pakai cara bicaramu sendiri. Rangkai informasi progres dan hasil menjadi jawaban lisan yang alami, '
     'tanpa membacakan label teknis, data mentah, atau menjelaskan pembagian kerja internal. '
-    'Gunakan konteks percakapan bersama, termasuk DM, saat relevan. Biarkan pemilik akun menentukan topik pembuka. '
+    'Biarkan pemilik akun menentukan topik pembuka. Jika ia menyapa atau mengecek sambungan, '
+    'jawab sapaan atau cek audionya saja dan tunggu ia melanjutkan. '
+    'Gunakan riwayat DM atau panggilan lama saat pemilik merujuknya atau saat menjawab topik yang ia angkat. '
     'Jawab langsung dari konteks dan hasil yang sudah tersedia. Jika detail lama belum tersedia, '
     'ambil dari riwayat percakapan ini. '
     'Pakai progres dan hasil dari pekerjaan DM yang sama, termasuk saat membahas lampiran. '
     'Tetap tanggapi obrolan dan pertanyaan baru secara langsung selama pekerjaan berjalan. '
     'Jika pemilik bertanya tentang pekerjaan itu, ceritakan langkah yang sungguh sedang kamu kerjakan. '
-    'Ajukan delegasi hanya untuk tindakan atau informasi yang memerlukan akses ke sesi WhatsApp atau alat. '
+    'Ajukan delegasi hanya untuk permintaan atau pertanyaan yang memerlukan akses ke sesi WhatsApp atau alat. '
+    'Tanggapi pembahasan tentang kemungkinan mengulang pekerjaan sebagai percakapan. '
+    'Mulai ulang pekerjaan saat pemilik meminta tindakan itu sekarang. '
     'Jika pemilik akun memilih agar hasil pekerjaan tetap di DM, teruskan pilihan itu ke client. '
     'Minta persetujuan atau penjelasan hanya jika pekerjaan memang membutuhkannya. '
     'Pekerjaan yang masih berjalan tidak membutuhkan konfirmasi dari pemilik. '
@@ -123,6 +127,8 @@ PCM_SILENCE_PEAK = 16  # 16-bit PCM; covers the idle noise floor of the realtime
 PLAYOUT_MARGIN_SECONDS = 0.6
 CHAT_UPDATE_CHUNK_BYTES = 500
 RECENT_TOOL_STEPS = 12
+# Batch progress ticks from a running tool; start, failure and completion stay immediate.
+TOOL_PROGRESS_INTERVAL = 0.25
 VOICE_HISTORY_FLUSH_TIMEOUT = 1.5
 DIAGNOSTIC_AUDIO_SECONDS = 180
 POST_ACK_TRANSCRIPT_WAIT = 3
@@ -164,7 +170,7 @@ def quote_chat(history, *, limit):
 
 
 def startup_chat_item(history, prompt, *, seeded_refs=None):
-    label = 'Riwayat percakapan WhatsApp sebelum panggilan (kutipan JSON):\n'
+    label = 'Kutipan JSON dari percakapan sebelum panggilan ini. Pakai sebagai rujukan saat relevan dengan ucapan pemilik saat ini.\n'
     remaining = STARTUP_HISTORY_BYTES - len(prompt.encode('utf-8')) - len(label.encode('utf-8')) - 2
     recent, summary = [], None
     for item in history:
@@ -304,9 +310,12 @@ class AgentJobs:
 
             yield updates()
 
-    async def observe_work(self, session_id, admission_id):
-        return await self._request({'action': 'observe_work', 'session_id': session_id,
-                                    'admission_id': admission_id, 'include_progress': True}, AGENT_CONTEXT_TIMEOUT)
+    async def observe_work(self, session_id, admission_id, *, include_code=False):
+        request = {'action': 'observe_work', 'session_id': session_id,
+                   'admission_id': admission_id, 'include_progress': True}
+        if include_code:
+            request['include_code'] = True
+        return await self._request(request, AGENT_CONTEXT_TIMEOUT)
 
     async def steer_work(self, session_id, admission_id, text):
         return await self._request({'action': 'steer_work', 'session_id': session_id,
@@ -325,8 +334,10 @@ class AgentJobs:
         return await self._request(request, AGENT_ROUTE_TIMEOUT)
 
     async def submit(self, submission_id, text, *, session_id, direction=None, voice_context=None,
-                     attachment_admission_id=None):
+                     attachment_admission_id=None, spoken_at_ms=None):
         request = {'submission_id': submission_id, 'text': text, 'session_id': session_id, 'wait_for_result': False}
+        if spoken_at_ms is not None:
+            request['spoken_at_ms'] = spoken_at_ms
         if direction is not None:
             request['direction'] = direction
         if voice_context:
@@ -840,7 +851,7 @@ class LiveCall:
         self.pending_ack = {}
         self.pending_deliveries = {}
         self.user_turns, self.delegated_turns = {}, set()
-        self.user_turn_at_ms = None
+        self.user_turn_at_ms = {}
         self.transcripts_done = {}
         self.reply_transcripts = {}
         self.finished_replies = set()
@@ -850,6 +861,9 @@ class LiveCall:
         self.loaded_context = ''
         self.dm_work = []
         self.work_progress = {}
+        self.pending_tool_progress = {}
+        self.tool_progress_ready = asyncio.Event()
+        self.tool_progress_task = None
         self.reported_application_failures = set()
         self.work_followers = {}
         self.shared_work_turns = set()
@@ -873,6 +887,9 @@ class LiveCall:
         self.interrupted_output_until = 0.0
         self.last_spoken_exchange = ''
         self.current_spoken_turn = None
+        self.waiting_for_caller = False
+        self.muted_reply_turn = None
+        self.speakable_handoff_until = 0.0
         self.spoken_turn_final = False
         self.assistant_reply_turn = None
         self.spoken_turn_audio_started = False
@@ -1047,6 +1064,8 @@ class LiveCall:
         old = self.audio
         candidate = None
         self.switch_updates = deque()
+        # Events after this snapshot are replayed from switch_updates during handover.
+        progress = {key: self.recent_tool_steps(steps.values()) for key, (_, steps) in self.work_progress.items()}
         try:
             async with asyncio.timeout(LIVE_SETUP_TIMEOUT):
                 turn_id = self.current_spoken_turn
@@ -1064,12 +1083,8 @@ class LiveCall:
                     history = resolved.get('history', [])
                     work = resolved.get('work', [])
                 seeded_refs = set()
-                items = self.connection_items(history, self.voice_prompt, '', seeded_refs=seeded_refs)
-                if work:
-                    items.append({'role': 'assistant', 'text': 'Status pekerjaan Hermes: ' + json.dumps([
-                        {key: entry[key] for key in ('admission_id', 'status', 'text') if key in entry}
-                        for entry in work if isinstance(entry, dict) and entry.get('session_id') == self.hermes_session_id
-                    ], ensure_ascii=False)[:AGENT_OUTPUT_LIMIT]})
+                work_context = self.replacement_work_context(work, progress)
+                items = self.connection_items(history, self.voice_prompt, work_context, seeded_refs=seeded_refs)
                 candidate = await self.open_routed_audio(self.voice_prompt, items, selection, exclude=exclude, only=only)
                 turn_id = self.current_spoken_turn
                 if turn_id and not self.spoken_turn_final and not old.failed.is_set():
@@ -1114,6 +1129,30 @@ class LiveCall:
             if (submission_ref and submission_ref in seeded_refs) or (refs and seeded_refs.issuperset(refs)):
                 continue
             await candidate.link.append_context(text)
+
+    def replacement_work_context(self, work, progress):
+        label = 'Status pekerjaan Hermes: '
+        remaining = AGENT_OUTPUT_LIMIT - len(label) - 2
+        rows = []
+        for entry in work:
+            if not isinstance(entry, dict) or entry.get('session_id') != self.hermes_session_id:
+                continue
+            row = {key: entry[key] for key in ('admission_id', 'status', 'text') if key in entry}
+            row['text'] = safe_text(row.get('text', ''))[:240]
+            encoded = json.dumps(row, ensure_ascii=False)
+            if len(encoded.encode()) > remaining:
+                continue
+            if row.get('status') == 'started':
+                selected = []
+                # Prefer recent facts when space is tight, but present them in event order.
+                for step in reversed(progress.get(row.get('admission_id'), ())):
+                    trial = json.dumps({**row, 'tool_steps': [step, *selected]}, ensure_ascii=False)
+                    if len(trial.encode()) <= remaining:
+                        selected.insert(0, step)
+                        encoded = trial
+            rows.append(encoded)
+            remaining -= len(encoded.encode()) + 1
+        return label + '[' + ','.join(rows) + ']' if rows else ''
 
     def fail(self, message):
         self.report.setdefault('error', safe_text(message))
@@ -1214,6 +1253,19 @@ class LiveCall:
                 if self.routing is not None and self.audio.failed.is_set():
                     continue
                 try:
+                    # A provider can generate unsolicited audio from a context append.
+                    # Keep an idle call quiet until a caller turn or an explicit spoken update.
+                    now = asyncio.get_running_loop().time()
+                    playout_finished = (self.latest_reply_turn in self.finished_replies
+                                        and 0 < self.playout_expected_until <= now)
+                    waiting_for_first_turn = (self.current_spoken_turn is None
+                                              and (self.call_direction != 'outbound' or playout_finished))
+                    reply_finished = (self.spoken_turn_final and self.spoken_reply
+                                      and self.spoken_turn_audio_started and playout_finished)
+                    if (self.active_reply_turn is None and not self.pending_deliveries and not self.pending_end_call
+                            and not (self.result_speech_start_deadline and now < self.result_speech_start_deadline)
+                            and now >= self.speakable_handoff_until and (waiting_for_first_turn or reply_finished)):
+                        self.waiting_for_caller = True
                     confirmed = await self.connection.append_context(text)
                 except ContextUpdateUnconfirmed as exc:
                     self.report['chat_updates_status'] = 'ack_timeout'
@@ -1245,6 +1297,9 @@ class LiveCall:
         step = {'tool': update['tool_name'], 'status': update['phase']}
         step.update({key: update[key] for key in ('detail', 'finding', 'exit_code', 'percent', 'application_outcome')
                      if update.get(key) is not None})
+        if isinstance(update.get('file_change'), dict):
+            # Code excerpts are returned on an explicit read of the task.
+            step['file_change'] = {key: value for key, value in update['file_change'].items() if key != 'code_excerpt'}
         if previous and not step.get('detail') and previous.get('detail'):
             step['detail'] = previous['detail']
         if previous == step or (
@@ -1262,6 +1317,8 @@ class LiveCall:
             self.mark('first_tool_failure_observed')
         summary = {'id_pekerjaan': admission_id, 'id_tool': tool_id, 'giliran_eksekusi': generation,
                    'pekerjaan': safe_text(work['text'])[:120], **step}
+        if type(update.get('seq')) is int:
+            summary['urutan'] = update['seq']
         text = json.dumps(summary, ensure_ascii=False)
         if step.get('application_outcome') == 'failed':
             self.mark('first_application_failure_observed')
@@ -1273,11 +1330,47 @@ class LiveCall:
                     self.pending_work_preview = None
                 self.queue_work_preview(admission_id, generation, update['seq'], step['finding'])
         if step['status'] == 'started' and (step.get('finding') or 'percent' in step):
-            # Keep frequent intra-tool notifications local. Asked status reads the latest snapshot.
+            self.pending_tool_progress.pop((admission_id, tool_id), None)
+            self.pending_tool_progress[admission_id, tool_id] = (generation, step, text)
+            self.tool_progress_ready.set()
+            if self.tool_progress_task is None:
+                self.tool_progress_task = self.spawn(self.flush_tool_progress())
             return
-        await self.append_chat_context(list(context_chunks(
-            text, 'Progres pekerjaan (data): ', 'Lanjutan progres pekerjaan: ',
-        )))
+        # A concurrent tool may still be running. Flush its last measurement before
+        # the newer lifecycle event so an earlier render tick never looks like a retry.
+        texts = []
+        for key in tuple(self.pending_tool_progress):
+            if key[0] == admission_id:
+                preceding_gen, preceding_step, preceding_text = self.pending_tool_progress.pop(key)
+                if preceding_gen == generation and steps.get(key[1]) is preceding_step:
+                    texts.append(preceding_text)
+        texts.append(text)
+        await self.send_tool_context(texts)
+
+    async def send_tool_context(self, texts):
+        return await self.append_chat_context(chain.from_iterable(
+            context_chunks(text, 'Progres pekerjaan (data): Simpan diam-diam untuk jawaban saat pemilik bertanya. '
+                                 'Jangan mulai bicara. Status ini hanya untuk langkah alat yang disebut.\n',
+                           'Lanjutan data progres senyap: ')
+            for text in texts
+        ))
+
+    async def flush_tool_progress(self):
+        while not self.closed and not self.failed.is_set():
+            await self.tool_progress_ready.wait()
+            await asyncio.sleep(TOOL_PROGRESS_INTERVAL)
+            self.tool_progress_ready.clear()
+            for key, due in tuple(self.pending_tool_progress.items()):
+                if self.pending_tool_progress.get(key) is not due:
+                    continue
+                generation, step, text = self.pending_tool_progress.pop(key)
+                admission_id, tool_id = key
+                current, steps = self.work_progress.get(admission_id, (None, {}))
+                # The watcher may have completed, reset or superseded this step while a
+                # previous context item was awaiting its provider acknowledgement.
+                if current == generation and steps.get(tool_id) is step:
+                    if not await self.send_tool_context([text]):
+                        return
 
     def progress_for_work(self, admission_id, execution_generation):
         if self.chat_reconnecting:
@@ -1288,19 +1381,23 @@ class LiveCall:
         return self.progress_context(steps.values())
 
     @staticmethod
-    def progress_context(steps):
+    def recent_tool_steps(steps):
         steps = list(steps)
-        recent = sorted(steps, key=lambda step: step['status'] == 'started')[-5:]
-        last_application_failure = next(
-            (step for step in reversed(steps) if step.get('application_outcome') == 'failed'), None,
-        )
-        if last_application_failure and last_application_failure not in recent:
-            recent = [last_application_failure, *recent[-4:]]
-        progress = json.dumps(recent, ensure_ascii=False)
+        recent = sorted(range(len(steps)), key=lambda i: steps[i]['status'] == 'started')[-5:]
+        last_failure = next((i for i in reversed(range(len(steps)))
+                             if steps[i].get('application_outcome') == 'failed'), None)
+        if last_failure is not None and last_failure not in recent:
+            recent = [last_failure, *recent[-4:]]
+        return [steps[i] for i in sorted(recent)]
+
+    @staticmethod
+    def progress_context(steps):
+        progress = json.dumps(LiveCall.recent_tool_steps(steps), ensure_ascii=False)
         return (
             'Jawab memakai snapshot terbaru ini dengan kata-katamu sendiri. '
             'Jika sebuah langkah gagal atau ada kendala yang dilaporkan alat, sebutkan dengan jelas. '
             'Sebut langkah yang sedang berjalan hanya dari data terbaru, lalu beri tahu jika detail belum diketahui. '
+            'Pembaruan sebelum kegagalan tidak membuktikan pekerjaan dicoba ulang. '
             'Status alat berlaku untuk langkahnya. Gunakan hasil tugas untuk menyatakan tugas selesai.\n' + progress
         )
 
@@ -1339,7 +1436,8 @@ class LiveCall:
         return '\n'.join(changes)
 
     def suppress_model_output(self):
-        if self.failed.is_set() or (self.audio is not None and self.audio.failed.is_set()):
+        if (self.waiting_for_caller or self.muted_reply_turn is not None or self.failed.is_set()
+                or (self.audio is not None and self.audio.failed.is_set())):
             return True
         interrupted = self.interrupted_output_until and (
             not self.spoken_turn_final or asyncio.get_running_loop().time() < self.interrupted_output_until
@@ -1408,7 +1506,7 @@ class LiveCall:
             if not (user or assistant):
                 return
             self.completed_exchanges.append(self.voice_exchange(
-                turn_id, assistant_turn, user, assistant, self.user_turn_at_ms, assistant_at_ms,
+                turn_id, assistant_turn, user, assistant, self.user_turn_at_ms.get(turn_id), assistant_at_ms,
             ))
             self.exchange_queued = True
             self.start_exchange_writer()
@@ -1667,6 +1765,17 @@ class LiveCall:
             user = role == 'user'
             turn_id = turn.get('id')
             identified = isinstance(turn_id, str) and bool(turn_id)
+            if not user and identified and turn_id == self.muted_reply_turn and kind == 'turn.done':
+                self.muted_reply_turn = None
+                if self.interrupted_output_until == float('inf'):
+                    self.interrupted_output_until = asyncio.get_running_loop().time() + PLAYOUT_MARGIN_SECONDS
+                return
+            if not user and self.waiting_for_caller and not history_only:
+                if identified:
+                    self.interrupted_replies.add(turn_id)
+                    if kind == 'turn.created':
+                        self.muted_reply_turn = turn_id
+                return
             if identified and (turn_id in self.interrupted_replies or turn_id in self.finished_replies
                                or (user and turn_id in self.reply_transcripts)
                                or (not user and turn_id in self.user_turns)):
@@ -1675,6 +1784,11 @@ class LiveCall:
             if user and identified:
                 started = turn_id not in self.user_turns
                 if started:
+                    if not history_only:
+                        if self.muted_reply_turn:
+                            self.interrupted_output_until = float('inf')
+                        self.waiting_for_caller = False
+                        self.speakable_handoff_until = 0.0
                     playing = self.active_reply_turn
                     self.finish_exchange()
                     previous = self.current_spoken_turn
@@ -1688,11 +1802,11 @@ class LiveCall:
                     if self.hermes_session_id and previous and not self.spoken_turn_final and self.spoken_reply:
                         slot = {'_turn_id': previous,
                                 '_transcript_deadline': asyncio.get_running_loop().time() + POST_ACK_TRANSCRIPT_WAIT}
-                        self.pending_spoken_replies[previous] = (slot, self.user_turn_at_ms, self.spoken_reply)
+                        self.pending_spoken_replies[previous] = (slot, self.user_turn_at_ms.get(previous), self.spoken_reply)
                         self.completed_exchanges.append(slot)
                     self.spoken_reply = {}
                     self.exchange_queued = False
-                    self.user_turn_at_ms = time.time_ns() // 1_000_000
+                    self.user_turn_at_ms[turn_id] = time.time_ns() // 1_000_000
                     self.user_turns[turn_id] = text.strip() if kind == 'turn.created' else ''
                     self.transcripts_done.setdefault(turn_id, asyncio.Event())
                     self.current_spoken_turn = turn_id
@@ -1741,6 +1855,8 @@ class LiveCall:
             elif kind == 'turn.created' and identified:
                 if turn_id in self.reply_transcripts:
                     return
+                self.muted_reply_turn = None
+                self.speakable_handoff_until = 0.0
                 self.reply_transcripts[turn_id] = text.strip()
                 preview = self.work_preview_start
                 self.work_preview_start = None
@@ -1919,8 +2035,8 @@ class LiveCall:
         if action == 'task':
             await self.run_voice_task(item_id, turn_id, request, released_early,
                                       attachment_admission_id=admission_id)
-        elif action in {'follow', 'steer', 'dm_only', 'delivery_status', 'speak_result', 'attachment', 'status'}:
-            if (action in {'follow', 'steer', 'dm_only', 'delivery_status', 'speak_result'}
+        elif action in {'follow', 'steer', 'dm_only', 'delivery_status', 'code_changes', 'speak_result', 'attachment', 'status'}:
+            if (action in {'follow', 'steer', 'dm_only', 'delivery_status', 'code_changes', 'speak_result'}
                     and any(entry['admission_id'] == admission_id for entry in work)):
                 if action in {'dm_only', 'speak_result'}:
                     earlier = self.result_preference_turns.get(admission_id)
@@ -1942,18 +2058,37 @@ class LiveCall:
                         channel='speakable' if turn_id == self.current_spoken_turn else 'commentary',
                     )
                     return
-                if action == 'delivery_status':
+                if action in {'delivery_status', 'code_changes'}:
                     self.shared_work_turns.add(turn_id)
-                    result = await self.agent_jobs.observe_work(self.hermes_session_id, admission_id)
+                    options = {'include_code': True} if action == 'code_changes' else {}
+                    result = await self.agent_jobs.observe_work(self.hermes_session_id, admission_id, **options)
                     if result.get('status') == 'session_changed':
                         self.session_changed()
                         return
                     status = (result.get('status') if result.get('session_id') == self.hermes_session_id
                               and result.get('admission_id') == admission_id else None)
-                    text = (dm_delivery_context(result) if status == 'completed'
-                            else WORK_STATUS_CONTEXT.get(status, WORK_UNCONFIRMED_CONTEXT))
+                    if action == 'code_changes':
+                        changes = []
+                        if status in {'started', 'completed', 'failed', 'interrupted', 'cancelled'}:
+                            for step in reversed(result.get('tool_steps', ())):
+                                if isinstance(step, dict) and isinstance(step.get('file_change'), dict):
+                                    change = step['file_change']
+                                    # Prioritize the requested excerpt and its file in a bounded spoken answer.
+                                    excerpt = {'code_excerpt': change['code_excerpt']} if 'code_excerpt' in change else {}
+                                    changes.append({'file': step.get('detail', ''), **excerpt, **change})
+                        text = 'Rincian perubahan file untuk pekerjaan ini belum tersedia. Sampaikan batas itu.'
+                        if changes:
+                            text = ('Jawab pertanyaan pemilik tentang file atau baris dari hasil alat ini. '
+                                    'Bedakan perubahan yang sudah ditulis dan bagian yang belum diketahui. '
+                                    'Kutip kode hanya dari cuplikan yang tersedia. Data perubahan: '
+                                    + json.dumps(changes, ensure_ascii=False))
+                    else:
+                        text = 'Jawab status pengiriman dengan wajar sesuai informasi ini. ' + (
+                            dm_delivery_context(result) if status == 'completed'
+                            else WORK_STATUS_CONTEXT.get(status, WORK_UNCONFIRMED_CONTEXT)
+                        )
                     await self.append_handoff(
-                        item_id, 'Jawab status pengiriman dengan wajar sesuai informasi ini. ' + text,
+                        item_id, text,
                         channel='speakable' if turn_id == self.current_spoken_turn else 'commentary',
                     )
                     return
@@ -1970,12 +2105,33 @@ class LiveCall:
                 'speakable' if turn_id == self.current_spoken_turn else 'commentary'
             ))
         elif action == 'end_call' and turn_id == self.current_spoken_turn:
+            farewell = 'Akhiri percakapan dengan salam penutup singkat dan alami.'
+            report_admission_failure = False
+            if new_work := decision.get('new_work'):
+                # The signed Hermes turn keeps the caller's exact words. The current call owns
+                # the hangup, and a durable admission lets the work outlive the audio connection.
+                self.native_task_turns.add(turn_id)
+                result = await self.submit_task(item_id, turn_id, request, closing_work=new_work)
+                if result is None or turn_id != self.current_spoken_turn:
+                    return
+                text, status, admitted = result
+                if not admitted or status not in {'pending', 'queued', 'started', 'completed'}:
+                    report_admission_failure = True
+                    self.assistant_reply_turn = None  # The earlier reply could not report this outcome.
+                    farewell = ('Beri tahu pemilik bahwa permintaan tambahan belum terkonfirmasi. '
+                                'Jangan nyatakan jadwal sudah dibuat. ' + farewell)
+                elif status == 'completed':
+                    farewell = text + '\n' + farewell
+                else:
+                    farewell = ('Permintaan sudah masuk ke sesi Hermes. Hasil, termasuk jadwal jika diminta, '
+                                'belum terkonfirmasi dan dapat diikuti lewat DM. ' + farewell)
             self.pending_end_call = (item_id, turn_id)
             self.report['assistant_hangup'] = 'requested'
             self.report['assistant_hangup_requests'] = self.report.get('assistant_hangup_requests', 0) + 1
             self.mark('first_hangup_intent_verified')
             self.spawn(self.end_when_farewell_expires(self.pending_end_call))
-            if self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started:
+            if not report_admission_failure and (
+                    self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started):
                 self.farewell_audio_sent = self.spoken_turn_audio_started
                 self.farewell_transcribed = bool(self.spoken_reply)
                 async with self.output_lock:
@@ -1983,8 +2139,7 @@ class LiveCall:
                 if not released_early:
                     await self.append_handoff(item_id, 'Pemilik meminta panggilan diakhiri.', channel='commentary')
             else:
-                await self.append_handoff(item_id, 'Akhiri percakapan dengan salam penutup singkat dan alami.',
-                                          audio_turn=turn_id)
+                await self.append_handoff(item_id, farewell, audio_turn=turn_id)
         else:
             if action in ('unavailable', 'unknown'):
                 self.report['handoff_route_unavailable'] = self.report.get('handoff_route_unavailable', 0) + 1
@@ -2002,6 +2157,10 @@ class LiveCall:
         if audio_turn is not None:
             self.pending_ack[item_id] = audio_turn
         try:
+            if channel == 'speakable':
+                self.waiting_for_caller = False
+                # The acknowledgment of the instruction can come before its audio or turn ID.
+                self.speakable_handoff_until = asyncio.get_running_loop().time() + RESULT_ACK_TIMEOUT
             self.connection.send_handoff(item_id, text[:AGENT_OUTPUT_LIMIT], channel)
             await asyncio.wait_for(acknowledgment, RESULT_ACK_TIMEOUT)
             return True
@@ -2219,6 +2378,7 @@ class LiveCall:
                 and now - self.last_speech_activity >= RESULT_SPEECH_QUIET_SECONDS)
 
     async def send_work_speech(self, text, *, preview=False):
+        self.waiting_for_caller = False
         now = asyncio.get_running_loop().time()
         self.result_speech_start_deadline = now + RESULT_ACK_TIMEOUT
         if preview:
@@ -2308,9 +2468,11 @@ class LiveCall:
             return ''
         return 'Bila detailnya belum tersedia, minta petunjuk singkat.'
 
-    async def submit_task(self, item_id, turn_id, request, *, attachment_admission_id=None):
+    async def submit_task(self, item_id, turn_id, request, *, attachment_admission_id=None, closing_work=None):
         submission_id = self.submission_id(turn_id)
         call_context = {'direction': self.call_direction} if self.call_direction is not None else {}
+        if turn_id in self.user_turn_at_ms:
+            call_context['spoken_at_ms'] = self.user_turn_at_ms[turn_id]
         if attachment_admission_id is not None:
             call_context['attachment_admission_id'] = attachment_admission_id
         if self.completed_exchanges:
@@ -2326,6 +2488,11 @@ class LiveCall:
                 ]
                 if unsaved:
                     call_context['voice_context'] = json.dumps(unsaved, ensure_ascii=False)[-6000:]
+        if closing_work:
+            call_context['voice_context'] = (call_context.get('voice_context', '') + '\n'
+                'Pemutusan panggilan ditangani oleh telepon. Biarkan pekerjaan yang sudah berjalan berlanjut. '
+                'Kerjakan permintaan baru ini dari ucapan pemilik: ' + json.dumps(closing_work, ensure_ascii=False)
+            ).strip()[-6000:]
         result = await self.agent_jobs.submit(submission_id, request, session_id=self.hermes_session_id,
                                               **call_context)
         status = result.get('status')
@@ -2435,6 +2602,8 @@ class LiveCall:
             work_context += '\nPemilik akun memilih hasil pekerjaan berikut di DM saja: ' + ', '.join(
                 sorted(self.dm_only_results),
             )
+        if self.call_direction == 'inbound' and (history or work_context):
+            self.waiting_for_caller = True
         initial_items = self.connection_items(history, prompt, work_context)
         chat_item = initial_items[0]
         self.loaded_context = chat_item['text'] if chat_item['role'] != 'developer' else ''

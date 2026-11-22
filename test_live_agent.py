@@ -98,7 +98,9 @@ def test_work_snapshot_reads_only_current_session_admissions(tmp_path, replaceme
 @pytest.mark.parametrize(('decision', 'expected'), [
     ({'action': 'reply'}, {'status': 'reply'}),
     ({'action': 'recall', 'terms': ['resi', 'kiriman']}, {'status': 'recall', 'terms': ['resi', 'kiriman']}),
-    ({'action': 'task'}, {'status': 'task'}),
+    ({'action': 'task'}, {'status': 'reply'}),
+    ({'action': 'task', 'evidence': 'Coba periksa paket.'}, {'status': 'reply'}),
+    ({'action': 'steer', 'evidence': 'Kita bahas resi.'}, {'status': 'reply'}),
     ({'action': 'end_call'}, {'status': 'end_call'}),
     ({'action': 'attachment'}, {'status': 'attachment'}),
     ({'action': 'status'}, {'status': 'status'}),
@@ -174,7 +176,7 @@ def test_call_rechecks_new_dm_work_before_submitting_a_possible_duplicate(tmp_pa
         routed_work.append(work)
         if not work:
             admissions.append(document)
-            return SimpleNamespace(parsed={'action': 'task'})
+            return SimpleNamespace(parsed={'action': 'task', 'evidence': 'Tolong lihat berkas'})
         return SimpleNamespace(parsed={'action': 'follow', 'admission_id': document['admission_id']})
 
     result = asyncio.run(live_agent._run(
@@ -195,6 +197,8 @@ def test_call_rechecks_new_dm_work_before_submitting_a_possible_duplicate(tmp_pa
     ({'action': 'dm_only', 'admission_id': 'b' * 32}, 'dm_only'),
     ({'action': 'dm_only', 'admission_id': 'c' * 32}, 'status'),
     ({'action': 'delivery_status', 'admission_id': 'b' * 32}, 'delivery_status'),
+    ({'action': 'code_changes', 'admission_id': 'b' * 32}, 'code_changes'),
+    ({'action': 'code_changes', 'admission_id': 'c' * 32}, 'status'),
     ({'action': 'speak_result', 'admission_id': 'b' * 32}, 'speak_result'),
     ({'action': 'task', 'admission_id': 'b' * 32}, 'task'),
     ({'action': 'task', 'admission_id': PHOTO_WORK['admission_id']}, 'attachment'),
@@ -210,6 +214,8 @@ def test_voice_routes_only_to_the_supplied_work(tmp_path, decision, status):
 
     async def classify(**kwargs):
         assert json.loads(kwargs['input'][0]['text'])['work'] == work
+        if decision['action'] in ('task', 'steer'):
+            return SimpleNamespace(parsed={**decision, 'evidence': 'Tolong fokus ke tulisan di pojok'})
         return SimpleNamespace(parsed=decision)
 
     gateway = FakeGateway()
@@ -218,13 +224,14 @@ def test_voice_routes_only_to_the_supplied_work(tmp_path, decision, status):
         llm=SimpleNamespace(acomplete_structured=classify),
     ))
     assert result == ({'status': status, 'admission_id': decision['admission_id']}
-                      if status in {'follow', 'steer', 'task', 'dm_only', 'delivery_status', 'speak_result'}
+                      if status in {'follow', 'steer', 'task', 'dm_only', 'delivery_status', 'speak_result', 'code_changes'}
                       else {'status': status})
     assert not gateway.calls
 
 
 @pytest.mark.parametrize(('utterance', 'decision', 'status'), [
-    ('Kirimkan hasilnya dalam PDF dan ZIP, ya.', {'action': 'task'}, 'task'),
+    ('Kirimkan hasilnya dalam PDF dan ZIP, ya.',
+     {'action': 'task', 'evidence': 'Kirimkan hasilnya dalam PDF dan ZIP'}, 'task'),
     ('Sudah dikirim PDF-nya?', {'action': 'delivery_status', 'admission_id': 'a' * 32}, 'delivery_status'),
     ('Laisse le résultat dans le chat.', {'action': 'dm_only', 'admission_id': 'a' * 32}, 'dm_only'),
 ])
@@ -247,7 +254,8 @@ def test_file_delivery_and_status_are_distinct_intents(tmp_path, utterance, deci
                                 'loaded_context': 'Laporan sudah tersedia.'},
         resolve=gateway.resolve, connect=gateway.connect, llm=SimpleNamespace(acomplete_structured=classify),
     ))
-    assert result == {'status': status, **{key: value for key, value in decision.items() if key != 'action'}}
+    assert result == {'status': status, **{key: value for key, value in decision.items()
+                                         if key == 'admission_id'}}
     assert not gateway.calls
 
 
@@ -565,6 +573,106 @@ def test_voice_step_redacts_registered_secret_before_truncation(monkeypatch):
 
 def test_voice_step_rejects_url_with_opaque_one_use_query_value():
     assert live_agent._voice_step_text('Use https://example.invalid/recover?k=syntheticoneusecode') == ''
+
+
+def test_completed_patch_pushes_hunks_and_reveals_only_safe_code_on_follow():
+    from tools.file_operations_common import PatchResult
+    from gateway.run_turn_progress import _tool_complete_payload
+
+    path = '/private/project/render.py'
+    diff = (f'--- a/{path}\n+++ b/{path}\n@@ -20,2 +20,3 @@\n'
+            ' def render(frame):\n-    return frame\n+    setup("private-value")\n+    return encode(frame)\n')
+    result = PatchResult(success=True, files_modified=[path], diff=diff).to_dict()
+    payload = _tool_complete_payload('patch-1', 'patch', {'path': path}, json.dumps(result), is_error=False)
+    event = {'type': 'tool.complete', 'session_id': PHOTO_WORK['session_id'],
+             'admission_id': PHOTO_WORK['admission_id'], 'execution_generation': 7, 'seq': 1, 'payload': payload}
+    pushed = live_agent._voice_tool_progress(event, PHOTO_WORK['session_id'], [PHOTO_WORK])
+    assert pushed['file_change'] == {
+        'effect': 'patched', 'files_modified': ['render.py'],
+        'hunks': [{'file': 'render.py', 'old_start': 20, 'old_count': 2, 'new_start': 20, 'new_count': 3,
+                   'first_removed_line': 21, 'first_added_line': 21}],
+    }
+    followed = live_agent._voice_tool_progress(event, PHOTO_WORK['session_id'], [PHOTO_WORK], include_code=True)
+    change = live_agent._public_tool_step(followed)['file_change']
+    assert change == {**pushed['file_change'],
+                      'code_excerpt': [{'file': 'render.py', 'line': 21, 'change': 'removed', 'text': 'return frame'},
+                                       {'file': 'render.py', 'line': 22, 'change': 'added', 'text': 'return encode(frame)'}]}
+    assert '/private/' not in str(change) and 'private-value' not in str(change)
+    assert live_agent._voice_tool_progress(event, 'another-session', [PHOTO_WORK], include_code=True) is None
+
+
+@pytest.mark.parametrize('tool, result, expected', [
+    ('patch', {'success': True, 'no_change': True, 'files_modified': ['/private/render.py']},
+     {'phase': 'completed', 'file_change': {'effect': 'no_change'}}),
+    ('patch', {'truncated': True, 'output': 'partial-data'}, {'phase': 'completed'}),
+    ('write_file', {'error': 'Write refused.', 'bytes_written': 0},
+     {'phase': 'failed', 'finding': 'Write refused.'}),
+    ('write_file', {'bytes_written': 0, 'resolved_path': '/private/empty.py', 'verified': True},
+     {'phase': 'completed', 'file_change': {'effect': 'written', 'bytes_written': 0, 'verified': True,
+                                             'files_modified': ['empty.py']}}),
+    ('write_file', {'bytes_written': False}, {'phase': 'completed'}),
+])
+def test_file_progress_uses_only_the_tool_result(tool, result, expected):
+    payload = {'result': json.dumps(result), 'args': {'content': 'private-input'}, 'is_error': False}
+    assert live_agent._tool_result_fields(payload, tool) == expected
+
+
+@pytest.mark.parametrize('verified, offset, included', [(True, 0, True), (False, 0, False), (True, 1, False)])
+def test_whole_file_query_reports_only_lines_from_intact_verified_write(verified, offset, included):
+    from tools.file_operations_common import WriteResult
+
+    content = 'password = private_value\nretries = 3\nprint("secret-literal")\nreturn retries + 1\n'
+    result = WriteResult(bytes_written=len(content.encode()) + offset, verified=verified).to_dict()
+    result['resolved_path'] = '/private/render.py'
+    payload = {'result': json.dumps(result), 'args': {'content': content}, 'is_error': False}
+    summary = live_agent._tool_result_fields(payload, 'write_file')['file_change']
+    assert 'code_excerpt' not in summary
+    change = live_agent._tool_result_fields(payload, 'write_file', include_code=True)['file_change']
+    assert 'hunks' not in change and 'private_value' not in json.dumps(change)
+    examples = change.get('code_excerpt', [])
+    assert [(e['line'], e['change'], e['text']) for e in examples] == (
+        [(2, 'written', 'retries = 3'), (4, 'written', 'return retries + 1')] if included else [])
+
+
+@pytest.mark.parametrize(('ask_code', 'epoch', 'has_steps'), [(False, 4, False), (True, 4, True), (True, 3, False)])
+def test_finished_work_replays_edits_only_on_explicit_scoped_detail_request(tmp_path, ask_code, epoch, has_steps):
+    job = PHOTO_WORK['admission_id']
+    file = 'render.py'
+    diff = ('--- a/render.py\n+++ b/render.py\n@@ -1 +1,3 @@\n-tries = 2\n+tries = 3\n'
+            '+secret_token = private_value\n+return retries + 1\n')
+    result = json.dumps({'success': True, 'files_modified': [file], 'diff': diff})
+    def event(seq, *, session='session-a', admission=job, generation=8, replay_epoch='stream'):
+        return {'type': 'tool.complete', 'session_id': session, 'admission_id': admission,
+                'seq': seq, 'execution_generation': generation, 'replay_epoch': replay_epoch,
+                'payload': {'name': 'patch', 'tool_id': f'patch-{seq}', 'args': {}, 'result': result}}
+
+    class FinishedGateway(FakeGateway):
+        async def rpc(self, method, **params):
+            if method == 'session.events.since':
+                self.calls.append((method, params))
+                return {'events': [event(1), event(2, session='other'), event(3, admission='b' * 32),
+                                   event(4, generation=9), event(5, replay_epoch='old')]}
+            response = await super().rpc(method, **params)
+            if method == 'session.resume':
+                response.update(running=True, execution_generation=9, replay_epoch='stream', last_sequence=5)
+            return response
+
+    gateway = FinishedGateway()
+    gateway.admissions['native'] = {'admission_id': job, 'ref': {'session_id': 'session-a'}}
+    gateway.receipt.update(execution_generation=8, authority_epoch=epoch)
+    response = asyncio.run(live_agent._run(
+        tmp_path, '1234567890', {'action': 'observe_work', 'session_id': 'session-a',
+                                 'admission_id': job, 'include_progress': True, 'include_code': ask_code},
+        resolve=gateway.resolve, connect=gateway.connect, read_work=lambda *_: [{**PHOTO_WORK, 'status': 'completed'}],
+    ))
+    assert response['status'] == 'completed'
+    assert ('tool_steps' in response) is has_steps
+    assert any(method == 'session.events.since' for method, _ in gateway.calls) is has_steps
+    if has_steps:
+        step, = response['tool_steps']
+        assert [(line['line'], line['text']) for line in step['file_change']['code_excerpt']] == [
+            (1, 'tries = 2'), (1, 'tries = 3'), (3, 'return retries + 1')]
+        assert 'private_value' not in json.dumps(step)
 
 
 @pytest.mark.parametrize('tool_result, expected', [
@@ -1747,6 +1855,16 @@ def test_repeat_delegation_uses_gateway_idempotency(tmp_path):
     submissions = [params for method, params in gateway.calls if method == 'prompt.submit']
     assert [params['submission_id'] for params in submissions] == [FIRST['submission_id']] * 2
     assert len(gateway.admissions) == 1
+
+
+def test_queued_voice_request_keeps_when_owner_spoke(tmp_path):
+    from datetime import datetime
+    gateway = FakeGateway()
+    spoken_at_ms = 1_700_000_000_123
+    run(tmp_path, {**FIRST, 'spoken_at_ms': spoken_at_ms}, gateway)
+    note = next(p['voice_context'] for method, p in gateway.calls if method == 'prompt.submit')
+    stamp = note.removeprefix(live_agent.VOICE_PREFIX + live_agent.VOICE_REQUEST_TIME).splitlines()[0]
+    assert round(datetime.fromisoformat(stamp).timestamp() * 1000) == spoken_at_ms
 
 
 def test_owner_live_submission_is_signed_before_gateway_admission(tmp_path):

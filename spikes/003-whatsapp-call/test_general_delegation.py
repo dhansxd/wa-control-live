@@ -69,8 +69,96 @@ def audio_messages(sent):
     return [message for message in sent if 'modelTurn' in message.get('serverContent', {})]
 
 
+@pytest.mark.parametrize('prior_turn', ['none', 'conversation', 'outbound_greeting'])
+def test_idle_context_does_not_speak_before_next_caller_turn(tmp_path, monkeypatch, prior_turn):
+    async def exercise():
+        voice, remote, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        async def turn(role, turn_id, kind, text=''):
+            await voice.on_data({'type': kind, 'turn': {'role': role, 'id': turn_id, 'transcript': text}})
+        async def append(text):
+            return True
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        try:
+            if prior_turn != 'none':
+                if prior_turn == 'conversation':
+                    await turn('user', 'first', 'turn.done', 'Halo Hermes.')
+                else:
+                    voice.call_direction = 'outbound'
+                    await voice.append_chat_context(['Panggilan balik dari Hermes.'])
+                await turn('assistant', 'greeting', 'turn.created')
+                await feed_output(voice, remote, 1700)
+                assert audio_messages(sent)
+                await turn('assistant', 'greeting', 'turn.done', 'Halo.')
+                voice.playout_expected_until = asyncio.get_running_loop().time() - 1
+            await voice.append_chat_context(['Pembaruan senyap: ekspor audio gagal.'])
+            sent.clear()
+            await feed_output(voice, remote, 1400)  # PCM can precede the provider turn ID.
+            await turn('assistant', 'unrequested', 'turn.created')
+            await turn('assistant', 'unrequested', 'turn.done', 'Ada progres baru.')
+            assert not sent
+            assert 'unrequested' not in voice.spoken_reply
+            await turn('user', 'question', 'turn.done', 'Apa yang gagal?')
+            await feed_output(voice, remote, 1500)
+            await turn('assistant', 'answer', 'turn.created')
+            await turn('assistant', 'answer', 'turn.done', 'Ekspor audionya gagal.')
+            assert len(audio_messages(sent)) == 1
+            assert sent[-1]['serverContent']['outputTranscription']['text'] == 'Ekspor audionya gagal.'
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
+
+
 async def acknowledge(voice, item_id):
     await voice.on_data({'type':'delegation.context.appended', 'delegation_item_id':item_id})
+
+
+@pytest.mark.parametrize('delayed', ['first_pcm', 'speakable_handoff'])
+def test_quiet_progress_preserves_expected_late_speech(tmp_path, monkeypatch, delayed):
+    async def exercise():
+        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        async def append(_text):
+            return True
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        try:
+            await voice.on_data({'type':'turn.done', 'turn':{'id':'u', 'role':'user', 'transcript':'Apa kabar?'}})
+            await voice.on_data({'type':'turn.created', 'turn':{'id':'a', 'role':'assistant'}})
+            if delayed == 'speakable_handoff':
+                await feed_output(voice, remote, 1500)
+            await voice.on_data({'type':'turn.done','turn':{'id':'a','role':'assistant','transcript':'Baik.'}})
+            if delayed == 'speakable_handoff':
+                voice.playout_expected_until = asyncio.get_running_loop().time() - 1
+                response = asyncio.create_task(voice.append_handoff('checked', 'Sampaikan hasil terbaru.'))
+                await wait_until(lambda: bool(appended))
+                await acknowledge(voice, 'checked')
+                assert await response
+            sent.clear()
+            await voice.append_chat_context(['Status tugas berubah.'])
+            await feed_output(voice, remote, 1600)
+            assert len(audio_messages(sent)) == 1
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
+
+
+def test_muted_audio_tail_stays_quiet_as_caller_starts_speaking(tmp_path, monkeypatch):
+    async def exercise():
+        voice, remote, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        async def append(_text):
+            return True
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        try:
+            await voice.append_chat_context(['Perkembangan tugas.'])
+            await voice.on_data({'type':'turn.created','turn':{'id':'quiet','role':'assistant'}})
+            await voice.on_data({'type':'turn.created','turn':{'id':'owner','role':'user'}})
+            await feed_output(voice, remote, 1700)
+            assert not audio_messages(sent)
+            await voice.on_data({'type':'turn.done','turn':{'id':'owner','role':'user','transcript':'Apa kabar?'}})
+            await voice.on_data({'type':'turn.created','turn':{'id':'new','role':'assistant'}})
+            await feed_output(voice, remote, 1800)
+            assert len(audio_messages(sent)) == 1
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
 
 
 def test_interrupting_voice_clears_playback_and_preserves_the_hermes_task(tmp_path, monkeypatch):
@@ -109,7 +197,7 @@ def test_caller_speech_clears_queued_audio_after_provider_finishes_reply(tmp_pat
         submissions = []
 
         class Jobs(TranscriptJobs):
-            async def submit(self, _submission_id, text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id, spoken_at_ms=None):
                 submissions.append((session_id, text))
                 return {'status': 'started', 'receipt': {
                     'session_id': session_id, 'admission_id': DM_ADMISSION_ID,
@@ -256,7 +344,7 @@ def test_confirmed_task_requires_final_transcript_and_returns_real_result(tmp_pa
                 assert proposal == current == ''.join(request_parts)
                 return {'status': 'task'}
 
-            async def submit(self, submission_id, text, *, session_id):
+            async def submit(self, submission_id, text, *, session_id, spoken_at_ms=None):
                 submitted.append((submission_id, text, session_id))
                 entered.set()
                 await release.wait()
@@ -321,7 +409,7 @@ def test_previous_task_speaks_once_after_the_current_exchange(tmp_path, monkeypa
             async def route(self, *_args, session_id):
                 return {'status': 'task'}
 
-            async def submit(self, _submission_id, text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id, spoken_at_ms=None):
                 submitted.append((text, session_id))
                 entered.set()
                 await release.wait()
@@ -476,7 +564,7 @@ def test_unlinked_or_backing_proposal_and_second_item_cannot_repeat_a_task(tmp_p
             async def route(self, *_args, session_id):
                 return {'status': 'task'}
 
-            async def submit(self, _submission_id, text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id, spoken_at_ms=None):
                 assert session_id == ACTIVE_WHATSAPP_SESSION
                 submitted.append(text)
                 return {'status': 'pending'}
@@ -524,7 +612,7 @@ def test_handoff_does_not_speak_results_from_a_different_chat(tmp_path, monkeypa
             async def route(self, *_args, session_id):
                 return {'status': 'task'}
 
-            async def submit(self, _submission_id, _text, *, session_id):
+            async def submit(self, _submission_id, _text, *, session_id, spoken_at_ms=None):
                 assert session_id == ACTIVE_WHATSAPP_SESSION
                 return result
 
@@ -699,7 +787,7 @@ def test_repeated_status_never_resubmits_a_dm_turn_or_hides_a_new_task(tmp_path,
                 status = 'started' if len(observed) == 1 else 'unavailable'
                 return {'status': status, 'session_id': session_id, 'admission_id': admission_id}
 
-            async def submit(self, _submission_id, request, *, session_id):
+            async def submit(self, _submission_id, request, *, session_id, spoken_at_ms=None):
                 submitted.append((request, session_id))
                 return {'status': 'completed', 'output': 'Daftar belanjanya sudah dibuat.',
                         'receipt': {'session_id': session_id, 'admission_id': 'unrelated-native-job'}}
@@ -747,6 +835,119 @@ def test_repeated_status_never_resubmits_a_dm_turn_or_hides_a_new_task(tmp_path,
         finally:
             await voice.close()
         assert saved == [(ACTIVE_WHATSAPP_SESSION, question, '') for question in status_questions]
+
+    asyncio.run(exercise())
+
+
+def test_live_silently_receives_latest_tool_progress_while_caller_keeps_talking(tmp_path, monkeypatch):
+    async def exercise():
+        work = {'session_id': ACTIVE_WHATSAPP_SESSION, 'admission_id': DM_ADMISSION_ID,
+                'status': 'started', 'text': 'Render video yang diminta di DM.'}
+        event = {'status': 'progress', 'session_id': ACTIVE_WHATSAPP_SESSION,
+                 'admission_id': DM_ADMISSION_ID, 'generation': 2, 'tool_id': 'render',
+                 'tool_name': 'render_video', 'phase': 'started'}
+        updates = asyncio.Queue()
+
+        class Jobs(TranscriptJobs):
+            @asynccontextmanager
+            async def watch_context(self, session_id, cursor):
+                async def events():
+                    yield {'status': 'ready', 'session_id': session_id, 'history_cursor': cursor,
+                           'history': [], 'work': [work]}
+                    while True:
+                        yield await updates.get()
+                yield events()
+
+        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        pending_ack = asyncio.Event()
+
+        def send(value):
+            item = json.loads(value)
+            assert item['type'] == 'session.context.append' and item['channel'] == 'commentary'
+            appended.append(item['content'][0]['text'])
+            if '"percent": 24' in appended[-1]:
+                pending_ack.set()
+            else:
+                voice.spawn(voice.connection.on_data({'type': 'session.context.appended'}))
+
+        voice.connection.channel.readyState = 'open'
+        voice.connection.channel.send = send
+        try:
+            voice.spawn(voice.follow_chat(0))
+            await asyncio.wait_for(voice.chat_context_ready.wait(), 1)
+            for percent in range(10, 25):
+                updates.put_nowait({**event, 'seq': percent, 'percent': percent})
+            await asyncio.wait_for(pending_ack.wait(), 1)
+            assert sum('"percent"' in text for text in appended) == 1
+
+            # A pending provider context receipt must not hold up the call's audio.
+            await voice.on_data({'type': 'turn.done', 'turn': {
+                'role': 'user', 'id': 'small-talk', 'transcript': 'Sekarang kita ngobrol santai dulu.'
+            }})
+            await voice.on_data({'type': 'turn.created', 'turn': {'role': 'assistant', 'id': 'reply'}})
+            await feed_output(voice, remote, 1500)
+            assert len(audio_messages(sent)) == 1
+            await voice.connection.on_data({'type': 'session.context.appended'})
+            await wait_until(lambda: '"percent": 24' in voice.loaded_context)
+
+            failure = {**event, 'seq': 27, 'tool_id': 'check-page', 'tool_name': 'browser_exec',
+                       'phase': 'completed', 'application_outcome': 'failed',
+                       'finding': 'Pembuatan audio gagal.'}
+            for update in ({**event, 'seq': 26, 'percent': 26}, failure, failure):
+                updates.put_nowait(update)
+            await wait_until(lambda: 'Pembuatan audio gagal.' in voice.loaded_context)
+            await wait_until(lambda: not voice.tool_progress_ready.is_set())
+            assert sum('Pembuatan audio gagal.' in text for text in appended) == 1
+            failure_index = next(i for i, text in enumerate(appended) if 'Pembuatan audio gagal.' in text)
+            assert any('"percent": 26' in text for text in appended[:failure_index])
+            assert all('"percent": 26' not in text for text in appended[failure_index + 1:])
+            assert voice.dm_work == [work] and not voice.delegations
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('status, bound', [('started', True), ('completed', True), ('completed', False)])
+def test_live_explicit_code_question_reads_only_same_job_without_repeating_its_result(tmp_path, monkeypatch, status, bound):
+    async def exercise():
+        question = 'Baris kode mana yang tadi kamu ubah?'
+        work = {'session_id': ACTIVE_WHATSAPP_SESSION, 'admission_id': DM_ADMISSION_ID,
+                'status': status, 'text': 'Perbaiki render.'}
+        calls = []
+
+        class Jobs(TranscriptJobs):
+            async def route(self, _proposal, current, _previous, _context, *, session_id):
+                assert current == question and session_id == ACTIVE_WHATSAPP_SESSION
+                return {'status': 'code_changes', 'admission_id': DM_ADMISSION_ID, 'work': [work]}
+
+            async def observe_work(self, session_id, admission_id, *, include_code):
+                calls.append((session_id, admission_id, include_code))
+                return {'status': status, 'session_id': session_id if bound else 'other-session',
+                        'admission_id': admission_id, 'output': 'Already delivered job result',
+                        'tool_steps': [{'file_change': {'effect': 'patched', 'code_excerpt': [
+                            {'file': 'render.py', 'line': 11, 'text': 'return audio.frames'},
+                        ]}}]}
+
+        voice, _, _, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        try:
+            voice.offered_work_results.add(DM_ADMISSION_ID)
+            await voice.on_data({'type': 'turn.done', 'turn': {
+                'role': 'user', 'id': 'caller-1', 'transcript': question,
+            }})
+            await voice.on_data(delegation([question]))
+            await wait_until(lambda: appended)
+            if appended[-1]['channel'] == 'commentary':
+                await acknowledge(voice, 'request-1')
+            await wait_until(lambda: any(item['channel'] == 'speakable' for item in appended))
+            await acknowledge(voice, 'request-1')
+            answers = [item['content'][0]['text'] for item in appended if item['channel'] == 'speakable']
+            assert len(answers) == 1 and ('return audio.frames' in answers[0]) is bound
+            assert 'Already delivered job result' not in answers[0]
+            assert calls == [(ACTIVE_WHATSAPP_SESSION, DM_ADMISSION_ID, True)]
+            assert not voice.work_followers
+        finally:
+            await voice.close()
 
     asyncio.run(exercise())
 
@@ -1161,7 +1362,7 @@ def test_pending_voice_task_is_observed_and_result_is_offered_once(
             async def route(self, *_args, session_id):
                 return {'status': 'task'}
 
-            async def submit(self, _submission_id, text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id, spoken_at_ms=None):
                 submitted.append((text, session_id))
                 return {'status': submit_status, 'receipt': receipt}
 
@@ -1246,7 +1447,7 @@ def test_follow_up_receives_the_voice_started_task_result_once(tmp_path, monkeyp
                 assert session_id == ACTIVE_WHATSAPP_SESSION
                 return {'status': 'follow', 'admission_id': DM_ADMISSION_ID, 'work': [work]}
 
-            async def submit(self, _submission_id, text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id, spoken_at_ms=None):
                 submitted.append((text, session_id))
                 submission_started.set()
                 await release_submission.wait()
@@ -1312,7 +1513,7 @@ def test_voice_acknowledges_work_and_keeps_talking_before_the_native_receipt(tmp
                 routes.append(current)
                 return {'status': 'task' if current == request else 'reply'}
 
-            async def submit(self, _submission_id, text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id, spoken_at_ms=None):
                 submissions.append((text, session_id))
                 submission_started.set()
                 await release_submission.wait()
@@ -1450,7 +1651,7 @@ def test_new_question_about_a_completed_attachment_submits_the_selected_native_d
                 return {'status': 'task', 'admission_id': DM_ADMISSION_ID,
                         'work': [later_work, work]}
 
-            async def submit(self, _submission_id, text, *, session_id, attachment_admission_id):
+            async def submit(self, _submission_id, text, *, session_id, attachment_admission_id, spoken_at_ms=None):
                 submitted.append((text, session_id, attachment_admission_id))
                 return {'status': 'completed', 'output': output,
                         'receipt': {'session_id': session_id, 'admission_id': 'b' * 32}}
@@ -1825,7 +2026,7 @@ def test_call_close_does_not_write_a_second_exchange_for_a_native_task(tmp_path,
             async def route(self, *_args, session_id):
                 return {'status': 'task'}
 
-            async def submit(self, _submission_id, text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id, spoken_at_ms=None):
                 submitted.append((session_id, text))
                 return {'status': 'completed', 'output': 'Catatan sudah selesai.',
                         'receipt': {'session_id': session_id, 'admission_id': 'native-task'}}
@@ -1873,7 +2074,7 @@ def test_next_turn_does_not_save_exchange_before_pending_route_finishes(
                 await release.wait()
                 return {'status': route_status}
 
-            async def submit(self, _submission_id, text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id, spoken_at_ms=None):
                 submitted.append((session_id, text))
                 if submit_status == 'queued':
                     return {'status': 'queued', 'receipt': {'session_id': session_id, 'admission_id': DM_ADMISSION_ID}}

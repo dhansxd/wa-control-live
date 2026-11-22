@@ -242,7 +242,8 @@ def test_delegated_request_keeps_all_instructions_without_replaying(tmp_path, sp
             routed.append((proposal, current))
             return {'status': 'task'}
 
-        async def native_task(submission_id, request, *, session_id):
+        async def native_task(submission_id, request, *, session_id, spoken_at_ms):
+            assert type(spoken_at_ms) is int
             assert session_id == 'session-a'
             submitted.append(request)
             return {'status': 'completed', 'output': 'Berhasil, daftar judul sudah ditambahkan.',

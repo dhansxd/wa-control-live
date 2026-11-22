@@ -56,10 +56,11 @@ aturan seperti menutup sendiri saat pekerjaan selesai atau saat hening.
 | Minta pekerjaan yang butuh waktu, lalu beralih ke obrolan biasa | Hermes menyebut satu langkah konkret yang akan ia lakukan sambil tugas mulai diproses. Model suara langsung menjawab obrolan baru selama pekerjaan berjalan. Ucapan biasa atau pertanyaan progres tidak mengubah, mengulang, atau membatalkan tugas. Saat ditanya apa yang sedang dilakukan, Hermes menjelaskan langkah terbaru yang terverifikasi dari tugas yang sama. |
 | Minta Hermes mencari sesuatu dan mengirimkannya ke WhatsApp | Hermes dapat menyebut singkat langkahnya sendiri, misalnya bahwa ia akan mencari dulu lalu mengirimkannya ke WhatsApp. Status sudah selesai dan sudah dikirim mengikuti bukti masing-masing. |
 | Jawaban langsung dan jeda setelahnya | Hermes menanggapi inti ucapan dengan nada yang mengikuti obrolan, tanpa pembuka generik di setiap giliran. Setelah menjawab, ia memberi ruang kepada pemilik untuk bicara. Hasil baru dan kendala yang perlu ditangani tetap dapat disampaikan. |
-| Langkah gagal saat tugas masih berjalan | Live memakai kejadian terverifikasi dari langkah yang sedang dikerjakan. Jika halaman melaporkan pembuatan gagal, sampaikan temuan itu tanpa menunggu balasan akhir di DM. Saat ditanya, pakai progres terbaru dan jelaskan bila langkah atau persentasenya belum diketahui. |
+| Langkah atau file berubah saat tugas berjalan | Perkembangan dari tugas DM atau telepon yang sama otomatis masuk ke konteks suara secara senyap. Saat ditanya, Hermes bisa menyebut angka yang dilaporkan tool, kegagalan di aplikasi, atau file yang benar-benar berubah sebelum ada jawaban akhir di DM. Permintaan rincian kode membaca hasil edit dari tugas tersebut. Jika detail belum tersedia, sebut langkah terakhir yang bisa diverifikasi. |
 | Mulai bicara saat asisten sedang menjawab | Audio jawaban lama berhenti saat pemilik menyela, termasuk saat model selesai menghasilkan jawaban tetapi audio masih antre. Panggilan menerima ucapan baru. Tugas aktif tetap berjalan. |
 | Beri arahan baru untuk tugas tertentu | Cocokkan tugas yang dimaksud dan gunakan jalur perubahan arahan Hermes. Permintaan berhenti bicara, permintaan mengakhiri telepon, dan permintaan membatalkan tugas adalah tindakan yang berbeda. |
 | Minta asisten mengakhiri panggilan saat kerja masih berjalan | Asisten meminta WhatsApp benar-benar menutup panggilan setelah maksud pemilik terverifikasi. Salam penutup boleh selesai atau dilewati jika audio tidak tersedia. Ucapan susulan dapat menyela penutupan, dan tugas tetap berjalan di sesi DM yang sama. |
+| Minta ditelepon kembali | Permintaan pemilik dari telepon atau DM dapat menjadwalkan satu panggilan melalui cron Hermes. Bedakan permintaan yang baru masuk dari jadwal yang sudah tersimpan. Jika pemilik sekaligus berpamitan, pertahankan pekerjaan yang sudah diterima dan tutup panggilan saat ini sesuai maksudnya. |
 | Hasil atau kebutuhan persetujuan muncul saat sedang mengobrol | Sampaikan status yang benar tanpa merebut giliran pemilik. Sebut kebutuhan persetujuan saat Hermes benar-benar memerlukannya dan gunakan mekanisme persetujuan asli Hermes. |
 
 Bedakan akhir produksi suara di provider, audio yang dikirim sidecar, dan
@@ -585,10 +586,12 @@ dan penutupan regresi yang memblokir rilis.
   Pengosongan antrean sidecar tidak menarik kembali frame yang sudah
   diserahkan ke jalur media. Bedakan jawaban lengkap dan terputus sesuai
   bukti yang bisa diukur.
-- [ ] Uji maksud penutupan alami ketika tugas berjalan, dengan dan tanpa
-  permintaan tugas pada ucapan yang sama. Bedakan penutupan panggilan, permintaan
-  berhenti bicara, dan pembatalan tugas. Simulasi penutupan dengan satu maksud
-  dan salam yang bisa disela sudah tersedia.
+- [x] Uji lokal mencakup permintaan tutup saat pekerjaan berjalan, permintaan
+  panggilan balik pada ucapan yang sama, serta ucapan yang mensyaratkan
+  penyelesaian jadwal sebelum telepon ditutup.
+- [ ] Uji alur pada ponsel: mulai tugas lewat DM, periksa progres lewat suara
+  sebelum hasil DM, minta panggilan balik, tutup sambungan dari Hermes, lalu
+  terima panggilan terjadwal. Cocokkan pekerjaan dan waktu panggilan.
 - [x] Perbaiki pemulihan akun yang sama setelah gangguan sementara pada
   panggilan aktif. Fixture mengonfirmasi percobaan ulang terikat pada alias akun
   dan API key yang sama jika digunakan. Koneksi gagal ditutup sebelum sesi

@@ -53,7 +53,7 @@ def test_hangup_intent_uses_structured_hermes_result(decision, expected):
         assert json.loads(kwargs['input'][0]['text']) == {
             'current': utterance, 'previous': previous, 'proposal': utterance, 'loaded_context': '',
         }
-        assert 'no other work' in kwargs['instructions']
+        assert 'already accepted' in kwargs['instructions']
         assert not {'provider', 'model'} & kwargs.keys()
         return SimpleNamespace(parsed=decision)
 
@@ -219,4 +219,75 @@ def test_existing_farewell_is_not_requested_twice(tmp_path, monkeypatch):
         finally:
             await voice.close()
 
+    asyncio.run(exercise())
+
+@pytest.mark.parametrize('work,close,expected', [
+    ('telepon aku besok jam sembilan', 'tutup sekarang', 'end_call'),
+    ('hapus berkasnya', 'tutup sekarang', 'reply'),
+    ('telepon aku besok jam sembilan', 'akhiri saja', 'reply'),
+    ('tutup sekarang', 'tutup sekarang', 'reply'),
+])
+def test_combined_hangup_binds_both_parts_to_current_words(work, close, expected):
+    current = 'Lanjutkan render yang sudah jalan, telepon aku besok jam sembilan, lalu tutup sekarang.'
+    async def classify(**_kwargs):
+        return SimpleNamespace(parsed={'action': 'end_call', 'new_work': work, 'end_evidence': close})
+
+    result = asyncio.run(_call_intent(SimpleNamespace(acomplete_structured=classify),
+                                     'hapus berkasnya', current, 'akhiri saja', ''))
+    assert result == ({'status': expected, 'new_work': work} if expected == 'end_call' else {'status': expected})
+
+
+@pytest.mark.parametrize('outcome', ['queued', 'unavailable', 'interrupted'])
+def test_combined_callback_is_admitted_once_before_hangup(tmp_path, monkeypatch, outcome):
+    async def exercise():
+        started, release = asyncio.Event(), asyncio.Event()
+        request = 'Lanjutkan render, telepon aku besok jam sembilan, lalu tutup sekarang.'
+        callback = 'telepon aku besok jam sembilan'
+        submissions = []
+
+        class Jobs(TranscriptJobs):
+            async def route(self, *_args, **_kwargs):
+                return {'status': 'end_call', 'new_work': callback}
+
+            async def submit(self, _submission_id, words, *, session_id, voice_context, spoken_at_ms=None):
+                submissions.append((words, session_id, voice_context))
+                started.set()
+                await release.wait()
+                if outcome == 'unavailable':
+                    return {'status': 'unavailable'}
+                return {'status': 'queued', 'receipt': {'admission_id': 'callback', 'session_id': session_id}}
+
+        voice, _, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        voice.call_work.add(DM_ADMISSION_ID)
+        monkeypatch.setattr(adapter, 'FAREWELL_WAIT_SECONDS', .02)
+        try:
+            await voice.on_data(turn('user', 'caller-1', request))
+            await voice.on_data(delegation([request]))
+            await asyncio.wait_for(started.wait(), 1)
+            assert end_call_events(sent) == []
+            await voice.on_data(delegation([request]))
+            if outcome == 'interrupted':
+                await voice.on_data(turn('user', 'caller-2', phase='created'))
+            elif outcome == 'unavailable':
+                await voice.on_data(turn('assistant', 'early', phase='created'))
+                await voice.on_data(turn('assistant', 'early', 'Aku urus dulu.'))
+            release.set()
+            await wait_until(lambda: bool(appended) or outcome == 'interrupted' and 'callback' in voice.call_work)
+            assert len(submissions) == 1
+            assert submissions[0][:2] == (request, voice.hermes_session_id)
+            assert callback in submissions[0][2]
+            assert DM_ADMISSION_ID in voice.call_work
+            if outcome != 'interrupted':
+                await wait_until(lambda: bool(end_call_events(sent)))
+                assert ('callback' in voice.call_work) == (outcome == 'queued')
+                assert len(end_call_events(sent)) == 1
+                assert 'jadwal' in appended[-1]['content'][0]['text'].lower()
+                assert 'belum terkonfirmasi' in appended[-1]['content'][0]['text'].lower()
+                assert appended[-1]['channel'] == 'speakable'
+            else:
+                assert not voice.pending_end_call
+                assert end_call_events(sent) == []
+        finally:
+            release.set()
+            await voice.close()
     asyncio.run(exercise())

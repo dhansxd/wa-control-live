@@ -1,6 +1,7 @@
 """Start or schedule an owner-requested callback through the voice sidecar."""
 
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import fcntl
 import http.client
 import json
@@ -15,9 +16,10 @@ _ALARM_NAME = 'Alarm telepon WhatsApp'
 _ALARM_PROMPT = (f'Call the WhatsApp owner now using {TOOL_NAME} with empty arguments. '
                  'Report the status returned by the tool.')
 DESCRIPTION = (
-    'Call the registered owner on WhatsApp when they ask in their DM. Interpret their intent '
+    'Call the registered owner on WhatsApp at their request in their DM or during a live call. Interpret their intent '
     'in context, from typed text or a voice message transcript in any language. '
     'Use empty arguments to call now, or pass schedule for a requested one-time alarm. '
+    'Resolve calendar dates against the time of the spoken request. For a spoken relative delay, use in 10m or similar. '
     'When executing the alarm in Hermes cron, use empty arguments to place the call. '
     'scheduled means a future call was scheduled. '
     'preparing_audio means the request was accepted and audio is being prepared before dialing. '
@@ -104,8 +106,26 @@ def _owner_request(home, owner, session_id):
         return row['admission_id']
 
 
-def _schedule(state, identity, admission_id, schedule, *, runtime):
-    from cron.jobs import get_job, parse_schedule
+def _live_request_time(home, admission_id):
+    from hermes_state import SessionDB
+    from hermes_state_runtime import get_session_admission
+    from .live_agent import VOICE_PREFIX, VOICE_REQUEST_TIME
+
+    with closing(SessionDB(home / 'state.db', read_only=True)) as db:
+        row = get_session_admission(db, admission_id=admission_id)
+    note = row['payload'].get('surface_v1', {}).get('voice_context', '') if row else ''
+    prefix = VOICE_PREFIX + VOICE_REQUEST_TIME
+    if note.startswith(prefix):
+        when = datetime.fromisoformat(note[len(prefix):].split('\n', 1)[0])
+        if when.tzinfo is None:
+            raise ValueError('Missing Live request timezone')
+        return when
+    return None
+
+
+def _schedule(state, identity, admission_id, schedule, *, runtime, spoken_at=None):
+    from cron.jobs import get_job, parse_duration, parse_schedule
+    from hermes_time import now as hermes_now
     from cron.occurrences import scheduled_instant
     from tools.cronjob_tools import cronjob
 
@@ -116,6 +136,9 @@ def _schedule(state, identity, admission_id, schedule, *, runtime):
     if parsed['kind'] != 'once':
         return {'status': 'invalid_schedule', 'error': 'An alarm needs a single date and time.'}
     when = parsed['run_at']
+    if spoken_at is not None and schedule.lower().startswith('in '):
+        minutes = parse_duration(schedule[3:].strip())
+        when = (spoken_at.astimezone(timezone.utc) + timedelta(minutes=minutes)).astimezone(spoken_at.tzinfo).isoformat()
     if not (runtime / 'config.json').is_file():
         return {'status': 'unavailable'}
     with (runtime / 'call-now.lock').open('a') as lock:
@@ -129,7 +152,9 @@ def _schedule(state, identity, admission_id, schedule, *, runtime):
                 if alarm.get('attempted') or (job and job['enabled']):
                     return {'status': 'scheduled', 'job_id': job_id, 'scheduled_at': alarm['when']}
                 return {'status': 'schedule_failed', 'job_id': job_id}
-        # Persist the DM's permission before the scheduler can fire the job.
+        if spoken_at is not None and datetime.fromisoformat(when) <= hermes_now():
+            return {'status': 'invalid_schedule', 'error': 'The requested callback time has already passed.'}
+        # Persist the owner's permission before the scheduler can fire the job.
         result = json.loads(cronjob(
             'create', schedule=when, name=_ALARM_NAME, deliver='origin', prompt=_ALARM_PROMPT,
             enabled_toolsets=['wa-control-live'], paused=True,
@@ -269,8 +294,10 @@ def _dial(state, identity, admission_id, *, runtime, execution=None):
 
 
 def call_now(ctx, args, *, session_id):
+    from gateway.session_ingress import viewer_turn
     from hermes_constants import get_hermes_home
     from . import _configured_pair, _live_enabled
+    from .whatsapp_owner_authorization import owner_send_request
 
     if not session_id or not isinstance(args, dict) or args.keys() - {'schedule'}:
         return {'status': 'denied'}
@@ -284,19 +311,27 @@ def call_now(ctx, args, *, session_id):
     try:
         pair = _configured_pair(ctx)
         owner, bot = pair or resolve_identity(home)
-        admission_id = _owner_request(home, owner, session_id) if execution is None else None
-        if execution is None and not admission_id:
-            return {'status': 'denied'}
+        runtime = ctx.state.data_dir / 'unified' if pair else ctx.state.data_dir
+        admission_id = None
+        spoken_at = None
+        if execution is None:
+            if viewer_turn.get() is None:
+                admission_id = _owner_request(home, owner, session_id)
+            elif verified := owner_send_request(home, owner, session_id, runtime):
+                admission_id, _ = verified
+                if schedule:
+                    spoken_at = _live_request_time(home, admission_id)
+            if not admission_id:
+                return {'status': 'denied'}
     except (OSError, RuntimeError, ValueError, sqlite3.Error):
         return {'status': 'unavailable'}
 
     if not _live_enabled(ctx):
         return {'status': 'live_setup_deferred'}
     identity = {'owner_number': owner, 'bot_number': bot, 'hermes_home': str(home)}
-    runtime = ctx.state.data_dir / 'unified' if pair else ctx.state.data_dir
     try:
         if schedule is not None:
-            return _schedule(ctx.state, identity, admission_id, schedule.strip(), runtime=runtime)
+            return _schedule(ctx.state, identity, admission_id, schedule.strip(), runtime=runtime, spoken_at=spoken_at)
         return _dial(ctx.state, identity, admission_id, runtime=runtime, execution=execution)
     except ConnectionRefusedError:
         return {'status': 'offline'}

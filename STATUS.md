@@ -169,6 +169,26 @@ Realtime, laporan audio gagal dari pekerjaan simulasi dapat diucapkan
 sebelum ada jawaban akhir. Probe penutupan terpisah mencatat perintah
 `end_call` pada sidecar simulasi ketika salam tidak selesai.
 
+Pada pengembangan setelah `a678992`, tes mereproduksi pembaruan persentase
+yang berhenti di cache Live serta rincian patch yang hilang sebelum masuk
+konteks. Probe dengan Codex Realtime dan audio sintetis juga menemukan model
+mulai berbicara setelah pembaruan konteks saat belum ada ucapan pemilik.
+Pada pengulangan setelah perbaikan, provider mengonfirmasi dua pembaruan,
+dan tidak ada audio jawaban yang diteruskan sebelum pertanyaan. Saat ditanya,
+Live menyebut angka 37 persen lalu kegagalan pembuatan audio, tanpa
+permintaan progres tambahan atau jawaban akhir dari pekerjaan simulasi.
+Probe ini memakai WebRTC ke provider asli dan data tugas sintetis.
+Probe terpisah dengan masukan suara meminta Hermes mengakhiri telepon sambil
+membiarkan tugas berjalan. Perintah penutupan mencapai penerima sidecar
+simulasi ketika konfirmasi audio salam tidak tiba. Model klasifikasi Hermes
+yang dikonfigurasi mengenali permintaan tutup saja, tutup beserta permintaan
+panggilan balik, dan ucapan yang meminta agar panggilan tetap terbuka.
+Tes cron di profil sementara memeriksa satu jadwal dari ucapan pemilik
+yang terverifikasi. Waktu relatif dihitung dari saat pemilik berbicara.
+Regresi kandidat pada Hermes v0.23.2 lulus 786 tes Python, 17 subtes, dan
+7 tes Baileys. Panggilan balik yang berdering dan penutupan dari sisi Hermes
+masih perlu dikonfirmasi pada ponsel.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak
