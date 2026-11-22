@@ -54,6 +54,12 @@ COMMENTARY_PRIVATE = re.compile(
     r'(?<![\w/:])(?:[\w.-]+[\\/])+[\w.-]+\.[\w-]+', re.IGNORECASE,
 )
 TOOL_EVENT_ID = re.compile(r'[A-Za-z0-9_.:-]{1,256}')
+TOOL_PROGRESS_EVENTS = frozenset({'tool.start', 'tool.progress', 'tool.complete'})
+BROWSER_FAILED_STATUS = re.compile(r'(?:gagal|failed)', re.IGNORECASE)
+BROWSER_FAILURE_DETAIL = re.compile(
+    r"^(?:pembuatan\s+(?P<subject>[^.!?]{1,70})\s+gagal|(?:generation|render(?:ing)?)\s+(?:has\s+)?failed|"
+    r"(?:couldn['’]t|could not|failed to)\s+(?:generate|render|create))\b", re.IGNORECASE,
+)
 VOICE_CONTEXT_LIMIT = 6000
 VOICE_SUBMISSION_REFERENCE = re.compile(r'wa-control-live:([0-9a-f]{32}):[0-9a-f]{64}')
 MIME_TYPE = re.compile(r'[a-z0-9][a-z0-9!#$&^_.+\-]*/[a-z0-9][a-z0-9!#$&^_.+\-]*')
@@ -284,8 +290,57 @@ def _read_context_updates(home, route_id, after_row_id):
     return list(history), rows[-1]['id']
 
 
+def _voice_step_text(text):
+    if not isinstance(text, str):
+        return ''
+    if not text.strip() or COMMENTARY_PRIVATE.search(text) or re.search(r'https?://', text, re.IGNORECASE):
+        return ''
+    from agent.redact import redact_sensitive_text
+    redacted = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+    return ' '.join(redacted.split())[:120]
+
+
+def _browser_generation_failure(output):
+    if not isinstance(output, str):
+        return ''
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for label, detail in zip(lines, lines[1:]):
+        if BROWSER_FAILED_STATUS.fullmatch(label) and (match := BROWSER_FAILURE_DETAIL.match(detail)):
+            subject = (match['subject'] or '').strip().lower()
+            subject = f' {subject}' if subject in {'audio', 'video', 'gambar'} else ''
+            return f'Halaman melaporkan pembuatan{subject} gagal.'
+    return ''
+
+
+def _tool_result_fields(payload, tool_name):
+    result = payload.get('result')
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            result = None
+    result = result if isinstance(result, dict) else {}
+    code = result.get('exit_code')
+    failed = (payload.get('is_error') is True or result.get('success') is False
+              or result.get('status') in ('failed', 'error', 'rejected')
+              or (type(code) is int and code != 0))
+    fields = {'phase': 'failed' if failed else 'completed'}
+    if failed and type(code) is int and code != 0:
+        fields['exit_code'] = code
+    if failed:
+        error = result.get('error')
+        if isinstance(error, dict):
+            error = error.get('message') or error.get('type')
+        if reason := _voice_step_text(result.get('user_summary') or error):
+            fields['finding'] = reason
+    elif tool_name == 'browser_exec' and (finding := _browser_generation_failure(result.get('output'))):
+        fields.update(application_outcome='failed', finding=finding)
+    return fields
+
+
 def _voice_tool_progress(event, session_id, work):
-    if event.get('type') not in {'tool.start', 'tool.complete'} or event.get('session_id') != session_id:
+    kind = event.get('type')
+    if kind not in TOOL_PROGRESS_EVENTS or event.get('session_id') != session_id:
         return None
     admission_id = event.get('admission_id')
     if not any(row['admission_id'] == admission_id and row['session_id'] == session_id
@@ -297,10 +352,13 @@ def _voice_tool_progress(event, session_id, work):
     tool_id, tool_name = payload.get('tool_id'), payload.get('name')
     if not all(isinstance(value, str) and TOOL_EVENT_ID.fullmatch(value) for value in (tool_id, tool_name)):
         return None
-    phase = 'started'
-    if event['type'] == 'tool.complete':
-        phase = 'failed' if payload.get('is_error') is True else 'completed'
-
+    fields = _tool_result_fields(payload, tool_name) if kind == 'tool.complete' else {'phase': 'started'}
+    if kind == 'tool.progress':
+        percent = payload.get('percent')
+        if type(percent) is int and 0 <= percent <= 100:
+            fields['percent'] = percent
+        if message := _voice_step_text(payload.get('message')):
+            fields['finding'] = message
     detail = ''
     args = payload.get('args')
     if isinstance(args, dict):
@@ -311,12 +369,22 @@ def _voice_tool_progress(event, session_id, work):
         elif tool_name in {'read_file', 'write_file', 'patch'}:
             from gateway.platforms.event import clean_attachment_filename
             detail = clean_attachment_filename(args.get('path'))
-    if detail:
-        from agent.redact import redact_sensitive_text
-        detail = redact_sensitive_text(detail, force=True, redact_url_credentials=True)[:120]
+        elif tool_name == 'browser_exec':
+            code = args.get('code')
+            if isinstance(code, str):
+                first = code.strip().partition('\n')[0]
+                if first.startswith('#'):
+                    detail = first.lstrip('#').strip()
     return {'status': 'progress', 'session_id': session_id, 'admission_id': admission_id,
             'generation': generation, 'seq': seq, 'tool_id': tool_id, 'tool_name': tool_name,
-            'phase': phase, 'detail': detail}
+            'detail': _voice_step_text(detail), **fields}
+
+
+def _public_tool_step(update):
+    # Keep both the tool's lifecycle and any reported result as data for Live.
+    return {'tool': update['tool_name'], 'status': update['phase'], 'detail': update['detail'],
+            **{key: update[key] for key in ('percent', 'finding', 'exit_code', 'application_outcome')
+               if key in update}}
 
 
 async def _replay_tool_progress(client, snapshot, session_id, work):
@@ -345,11 +413,18 @@ async def _replay_tool_progress(client, snapshot, session_id, work):
             key = (progress['admission_id'], progress['tool_id'])
             if key in latest and latest[key]['phase'] != 'started' and progress['phase'] == 'started':
                 continue
+            if key in latest and not progress['detail']:
+                progress['detail'] = latest[key]['detail']
             latest[key] = progress
     recent = sorted(latest.values(), key=lambda progress: progress['seq'])
     active = [progress for progress in recent if progress['phase'] == 'started']
     finished = [progress for progress in recent if progress['phase'] != 'started']
     selected = (finished + active)[-CONTEXT_PROGRESS_REPLAY_LIMIT:]
+    last_application_failure = next(
+        (step for step in reversed(finished) if step.get('application_outcome') == 'failed'), None,
+    )
+    if last_application_failure and last_application_failure not in selected:
+        selected[0] = last_application_failure
     return sorted(selected, key=lambda progress: progress['seq'])
 
 
@@ -507,7 +582,7 @@ async def _watch_context(home, owner_number, request, *, resolve, emit, connect=
                             emit({'status': 'progress_reset', 'session_id': session_id})
                             progress_visible = False
                         break
-                    if event_type in {'tool.start', 'tool.complete'} and event_epoch == epoch:
+                    if event_type in TOOL_PROGRESS_EVENTS and event_epoch == epoch:
                         progress = _voice_tool_progress(event, session_id, previous_work)
                         if progress and progress['seq'] > last_tool_seq:
                             if await asyncio.to_thread(resolve, home, owner_number) != route_id:
@@ -1106,10 +1181,7 @@ async def _run(home, owner_number, request, *, resolve, read_history=_read_histo
                     # Read progress from the same verified execution as the receipt.
                     active_work = [{**binding, 'status': 'started'}]
                     progress = await _replay_tool_progress(client, chat, session_id, active_work)
-                    result['tool_steps'] = [
-                        {'tool': step['tool_name'], 'status': step['phase'], 'detail': step['detail']}
-                        for step in progress
-                    ]
+                    result['tool_steps'] = [_public_tool_step(step) for step in progress]
                 if await asyncio.to_thread(resolve, home, owner_number) != current_route:
                     return {'status': 'unknown', **binding}
                 return {**result, **binding}

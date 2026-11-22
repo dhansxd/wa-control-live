@@ -550,6 +550,81 @@ def test_context_watcher_follows_the_same_dm_and_catches_up_after_reconnect(tmp_
     asyncio.run(exercise())
 
 
+def test_voice_step_redacts_registered_secret_before_truncation(monkeypatch):
+    from agent import redact_vault_values
+
+    monkeypatch.setattr(redact_vault_values, '_VAULT_REDACTION_VALUES', {})
+    secret = 'northwind-long-spelling-for-synthetic-registry-fixture-only'
+    redact_vault_values.register_vault_redaction_value(secret)
+    prefix = 'Lorem ipsum ' * 8
+    assert len(prefix) < 120 < len(prefix + secret)
+    safe = live_agent._voice_step_text(prefix + secret)
+    assert safe.startswith(prefix)
+    assert '«redacted-vault-secret»' in safe and secret[:14] not in safe
+
+
+def test_voice_step_rejects_url_with_opaque_one_use_query_value():
+    assert live_agent._voice_step_text('Use https://example.invalid/recover?k=syntheticoneusecode') == ''
+
+
+@pytest.mark.parametrize('tool_result, expected', [
+    ({'success': False, 'exit_code': 1, 'stderr': 'private-debug-log'},
+     {'phase': 'failed', 'exit_code': 1}),
+    ({'status': 'failed', 'request': {'state': 'rejected'}, 'success': False,
+      'error': {'message': 'Pembuatan ditolak.'}, 'stdout': 'private-debug-log'},
+     {'phase': 'failed', 'finding': 'Pembuatan ditolak.'}),
+    ({'success': False, 'error': {'message': 'See /private/work/secret.log'}, 'output': 'private-debug-log'},
+     {'phase': 'failed'}),
+])
+def test_browser_tool_failure_uses_bounded_structured_evidence(tool_result, expected):
+    event = {
+        'type': 'tool.complete', 'session_id': PHOTO_WORK['session_id'], 'admission_id': PHOTO_WORK['admission_id'],
+        'execution_generation': 7, 'seq': 1, 'payload': {'tool_id': 'browser-call', 'name': 'browser_exec',
+            'is_error': False, 'result': json.dumps(tool_result), 'context': 'private-debug-log',
+            'args': {'code': 'print("private-debug-log")'}},
+    }
+    update = live_agent._voice_tool_progress(event, PHOTO_WORK['session_id'], [PHOTO_WORK])
+    assert {key: update[key] for key in ('phase', 'exit_code', 'finding') if key in update} == expected
+    assert not update['detail'] and 'private-debug-log' not in json.dumps(update)
+
+
+@pytest.mark.parametrize('output, failed_medium', [
+    ('[]\nwarning\nGagal\nPembuatan audio gagal. Coba perintah lain atau kirim masukan.', 'audio'),
+    ('[]\nwarning\nGagal\nPembuatan video gagal. Coba lagi.', 'video'),
+    ('[]\nPembuatan video gagal disebut dalam petunjuk.', None),
+    ('[]\nGagal\nLanjutkan pemeriksaan.\nPembuatan audio gagal disebut dalam petunjuk.', None),
+])
+def test_browser_successful_page_read_keeps_separate_application_failure(output, failed_medium):
+    tool_result = {'success': True, 'exit_code': 0, 'output': output + '\n' + 'private-browser-output'}
+    event = {
+        'type': 'tool.complete', 'session_id': PHOTO_WORK['session_id'], 'admission_id': PHOTO_WORK['admission_id'],
+        'execution_generation': 7, 'seq': 1, 'payload': {'tool_id': 'page-read', 'name': 'browser_exec',
+            'is_error': False, 'result': json.dumps(tool_result)},
+    }
+    update = live_agent._voice_tool_progress(event, PHOTO_WORK['session_id'], [PHOTO_WORK])
+    assert update['phase'] == 'completed' and 'exit_code' not in update
+    if failed_medium:
+        assert update['application_outcome'] == 'failed'
+        assert update['finding'] == f'Halaman melaporkan pembuatan {failed_medium} gagal.'
+    else:
+        assert 'application_outcome' not in update and 'finding' not in update
+    assert 'private-browser-output' not in json.dumps(update)
+
+
+@pytest.mark.parametrize('raw_percent, expected_percent', [(37, 37), ('37%', None), (True, None), (131, None)])
+def test_native_tool_progress_preserves_only_valid_numeric_percent(raw_percent, expected_percent):
+    event = {
+        'type': 'tool.progress', 'session_id': PHOTO_WORK['session_id'], 'admission_id': PHOTO_WORK['admission_id'],
+        'execution_generation': 7, 'seq': 1, 'payload': {'tool_id': 'video-call', 'name': 'video_generate',
+            'progress': 37, 'total': 100, 'percent': raw_percent, 'message': 'See /private/work/secret.log',
+            'stdout': 'private-debug-log'},
+    }
+    update = live_agent._voice_tool_progress(event, PHOTO_WORK['session_id'], [PHOTO_WORK])
+    assert update['phase'] == 'started' and update.get('percent') == expected_percent
+    assert 'finding' not in update
+    assert 'secret.log' not in json.dumps(update) and 'private-debug-log' not in json.dumps(update)
+
+
 def test_context_watcher_delivers_verified_tool_progress_after_initial_ready(tmp_path):
     async def exercise():
         events, emitted = asyncio.Queue(), []
@@ -988,10 +1063,10 @@ def test_observing_running_work_replays_only_current_scoped_tool_steps(tmp_path)
     admission_id = PHOTO_WORK['admission_id']
     replay_epoch = 'live-epoch'
 
-    def tool(seq, kind, name, tool_id, *, admission=admission_id, generation=7, args=None):
+    def tool(seq, kind, name, tool_id, *, admission=admission_id, generation=7, **payload):
         return {'type': kind, 'session_id': 'session-a', 'admission_id': admission,
                 'seq': seq, 'execution_generation': generation, 'replay_epoch': replay_epoch,
-                'payload': {'tool_id': tool_id, 'name': name, 'args': args or {}}}
+                'payload': {'tool_id': tool_id, 'name': name, **payload}}
 
     class ProgressGateway(FakeGateway):
         async def rpc(self, method, **params):
@@ -1004,6 +1079,12 @@ def test_observing_running_work_replays_only_current_scoped_tool_steps(tmp_path)
                     tool(187, 'tool.complete', 'web_extract', 'extract'),
                     tool(188, 'tool.start', 'read_file', 'previous-run', generation=6),
                     tool(189, 'tool.start', 'read_file', 'read', args={'path': '/private/work/notes.txt'}),
+                    tool(190, 'tool.complete', 'browser_exec', 'browser', is_error=False,
+                         result=json.dumps({'success': False, 'exit_code': 1, 'stderr': 'private-debug-log'})),
+                    tool(191, 'tool.progress', 'read_file', 'read', percent=37),
+                    tool(192, 'tool.complete', 'browser_exec', 'page-read', is_error=False,
+                         result=json.dumps({'success': True, 'exit_code': 0,
+                                            'output': 'Gagal\nPembuatan audio gagal.'})),
                 ]}
             result = await super().rpc(method, **params)
             if method == 'session.resume':
@@ -1025,7 +1106,10 @@ def test_observing_running_work_replays_only_current_scoped_tool_steps(tmp_path)
         'status': 'started', 'session_id': 'session-a', 'admission_id': admission_id,
         'execution_generation': 7, 'tool_steps': [
             {'tool': 'web_extract', 'status': 'completed', 'detail': ''},
-            {'tool': 'read_file', 'status': 'started', 'detail': 'notes.txt'},
+            {'tool': 'browser_exec', 'status': 'failed', 'detail': '', 'exit_code': 1},
+            {'tool': 'read_file', 'status': 'started', 'detail': 'notes.txt', 'percent': 37},
+            {'tool': 'browser_exec', 'status': 'completed', 'detail': '', 'application_outcome': 'failed',
+             'finding': 'Halaman melaporkan pembuatan audio gagal.'},
         ],
     }
     assert [method for method, _ in gateway.calls] == [

@@ -148,6 +148,27 @@ Regresi lulus **729 tes Python dan 17 subtes**. Pada probe Codex Realtime,
 masukan suara sintetis menghasilkan rencana konkret dan jawaban atas
 pertanyaan santai sebelum tanda terima tugas simulasi dibuka.
 
+Pada panggilan `a49ac0d`, Live menyebut render masih berjalan setelah
+ada kegagalan langkah browser. Pembacaan halaman yang melaporkan
+pembuatan audio gagal tercatat 4,49 detik sebelum jawaban akhir Hermes.
+Tool pencatat berhasil membaca halaman itu. Versi tersebut hanya
+meneruskan status tool dan melewatkan status pembuatan dari halaman.
+Panggilan berakhir dari ponsel setelah satu percobaan penutupan oleh
+Live tercatat dibatalkan. Rekaman event provider tidak mencakup semua
+giliran terakhir.
+
+Kandidat setelahnya meneruskan kegagalan langkah dan status pembuatan
+yang terverifikasi saat pekerjaan berjalan. Pertanyaan progres memakai
+snapshot terbaru, termasuk persentase saat tool memang melaporkannya.
+Setelah maksud menutup panggilan terverifikasi, adapter meminta penutupan
+native walau provider tidak menyelesaikan salam. Ucapan susulan sebelum
+penutupan tetap dapat menyela. Panggilan perangkat nyata masih perlu
+membuktikan dua jalur itu.
+Regresi lulus **749 tes Python dan 17 subtes**. Dalam probe dengan Codex
+Realtime, laporan audio gagal dari pekerjaan simulasi dapat diucapkan
+sebelum ada jawaban akhir. Probe penutupan terpisah mencatat perintah
+`end_call` pada sidecar simulasi ketika salam tidak selesai.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak

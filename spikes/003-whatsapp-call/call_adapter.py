@@ -63,8 +63,10 @@ CALL_PROMPT = (
     'Pekerjaan yang masih berjalan tidak membutuhkan konfirmasi dari pemilik. '
     'Kalau ia kemudian minta mendengar hasilnya, ambil hasil pekerjaan yang sama. '
     'Kalau pemilik akun bertanya apa pekerjaan masih berjalan atau sedang sampai mana sekarang, '
-    'minta status terkini lewat client. Sebelum ada status itu, jangan menebak pekerjaan sedang '
-    'berjalan dari permintaan, ucapan, atau data progres lama. '
+    'gunakan pembaruan alat terverifikasi yang paling baru. Jika datanya belum cukup, tunggu snapshot '
+    'terkini dari client. Ucapan dalam riwayat bukan bukti keadaan alat saat ini. '
+    'Status tugas berjalan belum membuktikan sebuah langkah '
+    'seperti render sedang berjalan. Jika langkah gagal, sampaikan kegagalannya meskipun tugas belum selesai. '
     'Status akhir atau pembaruan bahwa data sudah kedaluwarsa mengalahkan progres sebelumnya. '
     'Jika ditanya apakah hasil sudah dikirim, minta status pengiriman terkonfirmasi lewat client. '
     'Pembaruan sementara bisa berubah. Gunakan hasil akhir jika sudah tersedia. '
@@ -114,6 +116,7 @@ STARTUP_HISTORY_BYTES = 24000  # Realtime V3 accepts 8192 estimated input tokens
 AGENT_OUTPUT_LIMIT = 3500
 RESULT_ACK_TIMEOUT = 10
 RESULT_SPEECH_QUIET_SECONDS = 1
+FAREWELL_WAIT_SECONDS = 2.5
 PCM_SILENCE_PEAK = 16  # 16-bit PCM; covers the idle noise floor of the realtime track.
 # The sidecar primes two 60 ms frames and hands off through an eight-frame channel.
 # Use this estimate only to avoid muting a fresh response after a quiet gap.
@@ -847,6 +850,7 @@ class LiveCall:
         self.loaded_context = ''
         self.dm_work = []
         self.work_progress = {}
+        self.reported_application_failures = set()
         self.work_followers = {}
         self.shared_work_turns = set()
         self.offered_work_results = set()
@@ -1237,10 +1241,12 @@ class LiveCall:
         if update['generation'] != generation:
             generation, steps = update['generation'], {}
         tool_id = update['tool_id']
-        step = {'tool': update['tool_name'], 'status': update['phase']}
-        if update.get('detail'):
-            step['detail'] = update['detail']
         previous = steps.get(tool_id)
+        step = {'tool': update['tool_name'], 'status': update['phase']}
+        step.update({key: update[key] for key in ('detail', 'finding', 'exit_code', 'percent', 'application_outcome')
+                     if update.get(key) is not None})
+        if previous and not step.get('detail') and previous.get('detail'):
+            step['detail'] = previous['detail']
         if previous == step or (
                 previous and previous['status'] in {'completed', 'failed'} and step['status'] == 'started'):
             return
@@ -1250,9 +1256,25 @@ class LiveCall:
             oldest_closed = next((key for key, value in steps.items() if value['status'] != 'started'), None)
             steps.pop(oldest_closed or next(iter(steps)))
         self.work_progress[admission_id] = generation, steps
+        progress_updates = self.report.setdefault('tool_progress_updates', {})
+        progress_updates[step['status']] = progress_updates.get(step['status'], 0) + 1
+        if step['status'] == 'failed':
+            self.mark('first_tool_failure_observed')
         summary = {'id_pekerjaan': admission_id, 'id_tool': tool_id, 'giliran_eksekusi': generation,
                    'pekerjaan': safe_text(work['text'])[:120], **step}
         text = json.dumps(summary, ensure_ascii=False)
+        if step.get('application_outcome') == 'failed':
+            self.mark('first_application_failure_observed')
+            scope = admission_id, generation
+            failure = *scope, step['finding']
+            if admission_id in self.call_work and failure not in self.reported_application_failures:
+                self.reported_application_failures.add(failure)
+                if self.pending_work_preview and self.pending_work_preview[:2] == scope:
+                    self.pending_work_preview = None
+                self.queue_work_preview(admission_id, generation, update['seq'], step['finding'])
+        if step['status'] == 'started' and (step.get('finding') or 'percent' in step):
+            # Keep frequent intra-tool notifications local. Asked status reads the latest snapshot.
+            return
         await self.append_chat_context(list(context_chunks(
             text, 'Progres pekerjaan (data): ', 'Lanjutan progres pekerjaan: ',
         )))
@@ -1267,9 +1289,20 @@ class LiveCall:
 
     @staticmethod
     def progress_context(steps):
+        steps = list(steps)
         recent = sorted(steps, key=lambda step: step['status'] == 'started')[-5:]
+        last_application_failure = next(
+            (step for step in reversed(steps) if step.get('application_outcome') == 'failed'), None,
+        )
+        if last_application_failure and last_application_failure not in recent:
+            recent = [last_application_failure, *recent[-4:]]
         progress = json.dumps(recent, ensure_ascii=False)
-        return 'Jelaskan progres pekerjaanmu dengan kata-katamu sendiri berdasarkan data ini.\n' + progress
+        return (
+            'Jawab memakai snapshot terbaru ini dengan kata-katamu sendiri. '
+            'Jika sebuah langkah gagal atau ada kendala yang dilaporkan alat, sebutkan dengan jelas. '
+            'Sebut langkah yang sedang berjalan hanya dari data terbaru, lalu beri tahu jika detail belum diketahui. '
+            'Status alat berlaku untuk langkahnya. Gunakan hasil tugas untuk menyatakan tugas selesai.\n' + progress
+        )
 
     def update_dm_work(self, work):
         if not isinstance(work, list):
@@ -1562,18 +1595,28 @@ class LiveCall:
             return True
         return False
 
-    async def end_after_farewell(self):
+    async def end_after_farewell(self, *, fallback=False):
         # Caller and assistant turn events race the PCM stream, so require both the spoken
-        # reply's transcript and actual output on the sidecar socket, under output_lock.
-        if (self.pending_end_call and self.spoken_turn_final
-                and self.farewell_audio_sent and self.farewell_transcribed):
+        # reply's transcript and actual output for the usual path. The sidecar always
+        # lets its playback drain, including when a provider never confirms the farewell.
+        if (not self.closed and self.pending_end_call and self.spoken_turn_final
+                and (fallback or self.farewell_audio_sent and self.farewell_transcribed)):
             item_id, spoken_turn = self.pending_end_call
-            if spoken_turn == self.current_spoken_turn and item_id not in self.pending_ack:
+            if spoken_turn == self.current_spoken_turn and (fallback or item_id not in self.pending_ack):
+                self.pending_ack.pop(item_id, None)
                 self.pending_end_call = None
                 self.end_call_sent = item_id
+                self.report['assistant_hangup_farewell'] = 'timeout' if fallback else 'sent'
+                self.mark('first_native_hangup_sent')
                 await self.send({'toolCall': {'functionCalls': [
                     {'id': item_id, 'name': 'end_call', 'args': {}},
                 ]}})
+
+    async def end_when_farewell_expires(self, request):
+        await asyncio.sleep(FAREWELL_WAIT_SECONDS)
+        async with self.output_lock:
+            if self.pending_end_call == request:
+                await self.end_after_farewell(fallback=True)
 
     def on_sidecar_response(self, tool_response):
         for response in tool_response.get('functionResponses', []):
@@ -1789,10 +1832,11 @@ class LiveCall:
                 has_result = (item_id in self.report['backend_completed_delegations']
                               or item_id in self.report.get('shared_dm_receipts', {}))
                 result_for_current = audio_turn is not None and audio_turn == self.current_spoken_turn and has_result
-                if result_for_current or (self.pending_end_call and self.pending_end_call[0] == item_id):
+                closing_reply = audio_turn is not None and self.pending_end_call and self.pending_end_call[0] == item_id
+                if result_for_current or closing_reply:
                     # Result/closing speech is separate from a reply already underway.
                     self.assistant_reply_turn = None
-                if self.pending_end_call and self.pending_end_call[0] == item_id:
+                if closing_reply:
                     self.farewell_audio_sent = self.farewell_transcribed = False
                 if result_for_current:
                     # WebRTC PCM has no delegation id and turn.done can be a fragment.
@@ -1824,7 +1868,8 @@ class LiveCall:
             released_early = await self.append_handoff(
                 item_id, 'Jawab inti ucapan pemilik secara langsung. '
                 'Kalau ia jelas meminta tindakan, sebut langkah konkret yang akan kamu lakukan, '
-                'tanpa menunggu hasil. Kalau ia bertanya tentang pekerjaan yang berjalan, gunakan status terkini.',
+                'tanpa menunggu hasil. Jika ditanya progres, pakai pembaruan alat terverifikasi yang terbaru '
+                'atau tunggu snapshot terkini jika datanya belum cukup.',
                 channel='commentary',
             )
             try:
@@ -1926,8 +1971,20 @@ class LiveCall:
             ))
         elif action == 'end_call' and turn_id == self.current_spoken_turn:
             self.pending_end_call = (item_id, turn_id)
-            await self.append_handoff(item_id, 'Akhiri percakapan dengan salam penutup singkat dan alami.',
-                                      audio_turn=turn_id)
+            self.report['assistant_hangup'] = 'requested'
+            self.report['assistant_hangup_requests'] = self.report.get('assistant_hangup_requests', 0) + 1
+            self.mark('first_hangup_intent_verified')
+            self.spawn(self.end_when_farewell_expires(self.pending_end_call))
+            if self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started:
+                self.farewell_audio_sent = self.spoken_turn_audio_started
+                self.farewell_transcribed = bool(self.spoken_reply)
+                async with self.output_lock:
+                    await self.end_after_farewell()
+                if not released_early:
+                    await self.append_handoff(item_id, 'Pemilik meminta panggilan diakhiri.', channel='commentary')
+            else:
+                await self.append_handoff(item_id, 'Akhiri percakapan dengan salam penutup singkat dan alami.',
+                                          audio_turn=turn_id)
         else:
             if action in ('unavailable', 'unknown'):
                 self.report['handoff_route_unavailable'] = self.report.get('handoff_route_unavailable', 0) + 1
@@ -1949,8 +2006,6 @@ class LiveCall:
             await asyncio.wait_for(acknowledgment, RESULT_ACK_TIMEOUT)
             return True
         except OSError as exc:
-            if self.pending_end_call and self.pending_end_call[0] == item_id:
-                self.cancel_end_call()
             self.pending_ack.pop(item_id, None)
             self.pending_deliveries.pop(item_id, None)
             key = 'handoff_ack_timeouts' if isinstance(exc, TimeoutError) else 'handoff_send_failures'
@@ -2030,6 +2085,7 @@ class LiveCall:
                 text = WORK_STATUS_CONTEXT.get(status, WORK_UNCONFIRMED_CONTEXT)
                 if status == 'started':
                     if 'tool_steps' in result:
+                        self.mark('first_fresh_work_status_requested_by_caller')
                         progress = (self.progress_context(result['tool_steps']) if result['tool_steps'] else
                                     'Langkah saat ini belum diketahui. Gunakan status terbaru ini.')
                     else:

@@ -5,9 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+import call_adapter as adapter
 from live_agent import _call_intent
 from test_general_delegation import (
-    acknowledge, delegation, feed_output, local_voice, wait_until,
+    DM_ADMISSION_ID, TranscriptJobs, acknowledge, delegation, feed_output, local_voice, wait_until,
 )
 
 
@@ -138,6 +139,83 @@ def test_hangup_waits_for_spoken_farewell_and_can_be_cancelled(tmp_path, monkeyp
                 await voice.on_data(turn('assistant', 'new-reply', phase='created'))
                 await feed_output(voice, remote, 1500)
                 assert 'modelTurn' in sent[-1]['serverContent']
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('outcome', ['missing_transcript', 'no_ack', 'caller_resumes'])
+def test_confirmed_hangup_does_not_depend_on_provider_farewell(tmp_path, monkeypatch, outcome):
+    async def exercise():
+        class Jobs(TranscriptJobs):
+            async def route(self, *_args, **_kwargs):
+                return {'status': 'end_call'}
+
+        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        voice.call_work.add(DM_ADMISSION_ID)
+        owner_request = 'Tutup teleponnya sekarang ya.'
+
+        try:
+            await voice.on_data(turn('user', 'caller-1', owner_request))
+            await voice.on_data(delegation([owner_request]))
+            await wait_until(lambda: bool(appended))
+            deadline_task = voice.tasks[-1]
+            if outcome == 'missing_transcript':
+                await acknowledge(voice, 'request-1')
+                await voice.on_data(turn('assistant', 'farewell', phase='created'))
+                await feed_output(voice, remote, 1700)
+            elif outcome == 'caller_resumes':
+                await voice.on_data(turn('user', 'caller-2', phase='created'))
+            assert end_call_events(sent) == []
+
+            await asyncio.wait_for(deadline_task, 1)
+            if outcome == 'caller_resumes':
+                assert voice.report['assistant_hangup'] == 'cancelled'
+                assert end_call_events(sent) == []
+            else:
+                assert voice.report['assistant_hangup_farewell'] == 'timeout'
+                assert end_call_events(sent) == [{'id': 'request-1', 'name': 'end_call', 'args': {}}]
+                await acknowledge(voice, 'request-1')
+                assert len(end_call_events(sent)) == 1
+            assert voice.call_work == {DM_ADMISSION_ID}
+        finally:
+            await voice.close()
+
+    monkeypatch.setattr(adapter, 'FAREWELL_WAIT_SECONDS', 0.05)
+    monkeypatch.setattr(adapter, 'RESULT_ACK_TIMEOUT', 0.01)
+    asyncio.run(exercise())
+
+
+def test_existing_farewell_is_not_requested_twice(tmp_path, monkeypatch):
+    async def exercise():
+        classified = asyncio.Event()
+        release = asyncio.Event()
+
+        class Jobs(TranscriptJobs):
+            async def route(self, *_args, **_kwargs):
+                classified.set()
+                await release.wait()
+                return {'status': 'end_call'}
+
+        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        owner_request = 'Tutup teleponnya sekarang ya.'
+        try:
+            await voice.on_data(turn('user', 'caller-1', owner_request))
+            await voice.on_data(delegation([owner_request]))
+            await asyncio.wait_for(classified.wait(), 1)
+            await voice.on_data(turn('assistant', 'farewell', phase='created'))
+            await feed_output(voice, remote, 1700)
+            await voice.on_data(turn('assistant', 'farewell', 'Sampai nanti.'))
+            assert end_call_events(sent) == []
+
+            release.set()
+            await wait_until(lambda: bool(end_call_events(sent)))
+            await wait_until(lambda: bool(appended))
+            assert [message['channel'] for message in appended] == ['commentary']
+            assert voice.report['assistant_hangup_farewell'] == 'sent'
+            await acknowledge(voice, 'request-1')
+            assert end_call_events(sent) == [{'id': 'request-1', 'name': 'end_call', 'args': {}}]
         finally:
             await voice.close()
 

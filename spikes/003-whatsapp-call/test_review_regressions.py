@@ -141,6 +141,8 @@ def test_transient_receipt_read_after_known_completion_recovers_without_new_work
 
 @pytest.mark.parametrize('steps, expected', [
     ([{'tool': 'read_file', 'status': 'started', 'detail': 'notes.txt'}], 'notes.txt'),
+    ([{'tool': 'browser_exec', 'status': 'completed', 'application_outcome': 'failed',
+       'finding': 'Halaman melaporkan pembuatan audio gagal.'}], 'pembuatan audio gagal'),
     ([], 'Langkah saat ini belum diketahui'),
 ])
 def test_requested_progress_uses_fresh_observer_instead_of_lagging_voice_context(
@@ -176,6 +178,52 @@ def test_requested_progress_uses_fresh_observer_instead_of_lagging_voice_context
             await voice.close()
 
     asyncio.run(exercise())
+
+
+def test_application_failure_reaches_live_before_final_task_receipt_and_is_only_offered_once(tmp_path, monkeypatch):
+    async def exercise():
+        voice = voice_fixture(tmp_path, monkeypatch, SimpleNamespace())
+        context, previews = [], []
+
+        async def append_chat(items):
+            context.extend(items)
+            return True
+
+        voice.append_chat_context = append_chat
+        voice.queue_work_preview = lambda *args: previews.append(args)
+        voice.dm_work = [{'admission_id': 'admission-a', 'status': 'started', 'text': 'Buat video.'}]
+        voice.call_work.add('admission-a')
+        voice.pending_work_preview = 'admission-a', 7, 'Perkiraan lama.'
+        failure = {'admission_id': 'admission-a', 'generation': 7, 'seq': 219, 'tool_id': 'first',
+                   'tool_name': 'browser_exec', 'phase': 'completed', 'application_outcome': 'failed',
+                   'finding': 'Halaman melaporkan pembuatan audio gagal.'}
+        try:
+            await voice.apply_tool_progress(failure)
+            await voice.apply_tool_progress({**failure, 'seq': 222, 'tool_id': 'second'})
+            next_finding = 'Halaman melaporkan pembuatan video gagal.'
+            await voice.apply_tool_progress({**failure, 'seq': 224, 'tool_id': 'third', 'finding': next_finding})
+            assert previews == [('admission-a', 7, 219, failure['finding']), ('admission-a', 7, 224, next_finding)]
+            assert any(failure['finding'] in text for text in context)
+            assert voice.pending_work_preview is None
+            assert voice.dm_work[0]['status'] == 'started'
+            assert 'first_application_failure_observed' in voice.report['timings_seconds']
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+def test_progress_context_keeps_running_step_and_last_application_failure():
+    active = {'tool': 'browser_exec', 'status': 'started', 'detail': 'Periksa percobaan terbaru'}
+    failure = {'tool': 'browser_exec', 'status': 'completed', 'application_outcome': 'failed',
+               'finding': 'Pembuatan audio gagal.'}
+    background = [{'tool': 'read_file', 'status': 'completed', 'detail': f'Dokumen {index}'}
+                  for index in range(6)]
+
+    context = adapter.LiveCall.progress_context([active, failure, *background])
+
+    assert active['detail'] in context
+    assert failure['finding'] in context
 
 
 @pytest.mark.parametrize('spoken_request', [
