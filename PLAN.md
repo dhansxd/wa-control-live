@@ -48,8 +48,10 @@ aturan seperti menutup sendiri saat pekerjaan selesai atau saat hening.
 | Skenario | Perilaku yang harus dialami pemilik |
 | --- | --- |
 | Mulai dari DM, lalu telepon | Hermes melanjutkan percakapan yang sama, dengan identitas, konteks, lampiran, dan pekerjaan aktif dari DM. Sesudah telepon, lanjutkan lewat DM yang sama. |
+| Kirim pesan biasa ke DM Hermes | WhatsApp menampilkan indikator mengetik dari siklus bawaan Hermes saat agen menyiapkan balasan. |
 | Minta pekerjaan yang butuh waktu, lalu beralih ke obrolan biasa | Asisten tetap bisa menjawab secara alami selama Hermes bekerja. Ucapan biasa atau pertanyaan progres tidak mengubah, mengulang, atau membatalkan tugas. Progres dan hasil berasal dari tugas yang sama. |
-| Diam setelah Hermes selesai menjawab | Hermes memberi ruang kepada pemilik untuk bicara. Pembaruan status rutin tetap tersedia saat ditanya. Hasil baru dan kendala yang perlu ditangani tetap dapat disampaikan. |
+| Minta Hermes mencari sesuatu dan mengirimkannya ke WhatsApp | Hermes dapat menyebut singkat langkahnya sendiri, misalnya bahwa ia akan mencari dulu lalu mengirimkannya ke WhatsApp. Status sudah selesai dan sudah dikirim mengikuti bukti masing-masing. |
+| Jawaban langsung dan jeda setelahnya | Hermes menanggapi inti ucapan dengan nada yang mengikuti obrolan, tanpa pembuka generik di setiap giliran. Setelah menjawab, ia memberi ruang kepada pemilik untuk bicara. Hasil baru dan kendala yang perlu ditangani tetap dapat disampaikan. |
 | Mulai bicara saat asisten sedang menjawab | Audio jawaban lama berhenti saat pemilik menyela, termasuk saat model selesai menghasilkan jawaban tetapi audio masih antre. Panggilan menerima ucapan baru. Tugas aktif tetap berjalan. |
 | Beri arahan baru untuk tugas tertentu | Cocokkan tugas yang dimaksud dan gunakan jalur perubahan arahan Hermes. Permintaan berhenti bicara, permintaan mengakhiri telepon, dan permintaan membatalkan tugas adalah tindakan yang berbeda. |
 | Minta asisten mengakhiri panggilan saat kerja masih berjalan | Asisten bisa menutup panggilan secara nyata setelah memahami maksud pemilik. Uji salam penutup yang alami, ucapan susulan sebelum sambungan putus, dan hasil dari tugas yang sama tetap tersedia di DM. |
@@ -72,6 +74,9 @@ kesetaraan pengalaman memerlukan pengamatan kedua permukaan.
 
 [Panduan ChatGPT Voice Desktop](https://learn.chatgpt.com/docs/features/voice)
 · [Arsitektur suara GPT-Live](https://openai.com/index/continuous-voice-interaction-with-gpt-live/)
+· [Gaya bicara GPT-Live saat memakai alat](https://developers.openai.com/api/docs/guides/live-prompting#personality-during-tool-calls)
+· [Waktu menyuarakan hasil di Gemini Live](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/live-api/asynchronous-function-calling)
+· [Percakapan saat pekerjaan berjalan di LiveKit](https://docs.livekit.io/agents/logic/patterns/subagent-delegation/#maintaining-coherence)
 · [Panduan evaluasi GPT-Live](https://developers.openai.com/cookbook/examples/audio/voice_agent_evaluation)
 
 ## Pemilik dan chatbot tamu

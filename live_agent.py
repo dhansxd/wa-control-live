@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager, closing
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import partial
+from importlib import import_module
 import json
 import os
 from pathlib import Path
@@ -665,16 +666,16 @@ def _read_recall(home, route_id, terms):
 
 def _read_persona(home):
     try:
-        if not (home / 'SOUL.md').is_file():
-            return None
-        from agent.prompt_builder import load_soul_md
-
-        persona = load_soul_md(home_override=home)
-    except (ImportError, OSError):
+        prompts = import_module('agent.prompt_builder')
+    except ImportError:
         return None
-    if not persona or persona.startswith('[BLOCKED: SOUL.md '):
-        return None
-    return persona[:VOICE_PERSONA_MAX_CHARS].rstrip()
+    try:
+        persona = prompts.load_soul_md(home_override=home) if (home / 'SOUL.md').is_file() else None
+    except OSError:
+        persona = None
+    if persona and not persona.startswith('[BLOCKED: SOUL.md '):
+        return persona[:VOICE_PERSONA_MAX_CHARS].rstrip()
+    return getattr(prompts, 'DEFAULT_AGENT_IDENTITY', None)
 
 
 def _visible_history(rows, clean_text, *, include_message_refs=False):

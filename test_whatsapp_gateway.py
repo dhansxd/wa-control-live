@@ -357,7 +357,7 @@ def test_same_authenticated_sidecar_receives_owner_dm_and_sends_reply(tmp_path, 
     async def exercise():
         first_poll, wait_for_close = asyncio.Event(), asyncio.Event()
         health_read = asyncio.Event()
-        requests = []
+        requests, typing_updates = [], []
         owner_jid = f"{OWNER}@s.whatsapp.net"
         typed = {"id": "original-1", "text": "Lanjutkan yang tadi.", "chat_id": LID,
                  "sender_id": LID, "sender_id_alt": owner_jid}
@@ -381,10 +381,16 @@ def test_same_authenticated_sidecar_receives_owner_dm_and_sends_reply(tmp_path, 
             requests.append(await request.json())
             return web.json_response({"message_id": "reply-from-same-sidecar"})
 
+        async def typing(request):
+            assert request.headers.get("Authorization") == f"Bearer {TOKEN}"
+            typing_updates.append(await request.json())
+            return web.Response(status=204 if len(typing_updates) == 1 else 503)
+
         app = web.Application()
         app.router.add_get("/health", health)
         app.router.add_get("/owner/messages", inbound)
         app.router.add_post("/owner/messages", outbound)
+        app.router.add_post("/owner/typing", typing)
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, "127.0.0.1", 0).start()
@@ -404,9 +410,10 @@ def test_same_authenticated_sidecar_receives_owner_dm_and_sends_reply(tmp_path, 
             assert await adapter.connect()
             await asyncio.wait_for(health_read.wait(), 2)
             if paired_bot != BOT:
+                await adapter.send_typing(OWNER)
                 reply = await adapter.send(OWNER, "Jangan dikirim.")
                 assert adapter.send_path_degraded and not reply.success
-                assert not first_poll.is_set() and not requests
+                assert not first_poll.is_set() and not requests and not typing_updates
                 handler.assert_not_awaited()
                 return
             await asyncio.wait_for(first_poll.wait(), 2)
@@ -417,6 +424,11 @@ def test_same_authenticated_sidecar_receives_owner_dm_and_sends_reply(tmp_path, 
                 typed["id"], typed["text"], Platform.WHATSAPP, "dm",
             )
             assert (event.source.chat_id, event.source.user_id, event.source.user_id_alt) == (OWNER, OWNER, LID)
+            await adapter.send_typing(event.source.chat_id)
+            await adapter.send_typing(LID)
+            await adapter.send_typing("15550100104")
+            await adapter.send_typing("4022@lid")
+            assert typing_updates == [{"chat_id": LID}, {"chat_id": LID}]
             reply = await adapter.send(event.source.chat_id, "Bisa, kita lanjut.")
             assert reply.success and reply.message_id == "reply-from-same-sidecar"
             assert (await adapter.send(LID, "Lanjut di percakapan yang sama.")).success

@@ -260,6 +260,19 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
             return self.owner_lid or f"{self.owner}@s.whatsapp.net"
         return None
 
+    async def send_typing(self, chat_id, metadata=None):
+        recipient = self._owner_recipient(chat_id)
+        if recipient is None:
+            return
+        try:
+            async with self.http.post("/owner/typing", json={"chat_id": recipient},
+                                      timeout=aiohttp.ClientTimeout(total=1.5),
+                                      allow_redirects=False) as response:
+                response.raise_for_status()
+        except (aiohttp.ClientError, OSError, TimeoutError):
+            # Typing is best-effort and does not affect final reply delivery.
+            logger.debug("WhatsApp typing update unavailable.")
+
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         recipient = self._owner_recipient(chat_id)
         if recipient is None:

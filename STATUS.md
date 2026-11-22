@@ -104,6 +104,33 @@ sintetis dan jeda sekitar sepuluh detik, Hermes menyebut identitasnya dalam
 satu jawaban dengan audio bersuara. Panggilan WhatsApp dengan kandidat ini
 dan uji skenario yang sama di ChatGPT Desktop masih perlu diamati.
 
+Panggilan WhatsApp pada `978704f` tersambung dan satu pekerjaan Hermes
+menghasilkan tanda terima. Dua dari lima giliran asisten memakai variasi
+pembuka yang menyatakan sudah memahami ucapan pemilik. Pembaruan berikutnya
+memakai identitas bawaan profil Hermes jika SOUL tidak berisi persona yang
+valid. Saat berbicara Hermes langsung menanggapi inti ucapan dan bisa
+menyebut rencana konkret sekali jika berguna. Pada probe instruksi jawaban
+langsung di Codex Realtime, dua pertanyaan sintetis mendapat masing-masing
+satu jawaban langsung. Gaya bicara pada panggilan nyata setelah pembaruan
+masih perlu diamati.
+
+DM pemilik menyampaikan balasan, tetapi adapter plugin belum meneruskan
+indikator mengetik dari Hermes. Plugin kini mengirim status itu melalui
+sidecar yang sama dengan DM pemilik. Penerusan mengikuti siklus Hermes
+dan kegagalan sementara pada indikator tidak menahan balasan. Tes gateway
+mencakup rute pemilik dengan nomor atau LID serta kegagalan sementara.
+
+Uji baca Control pada profil `default` dan dua akun tertaut berhasil
+membaca kontak, daftar grup, metadata grup, dan riwayat DM yang tersimpan
+di cache ketika memakai LID chat. Kueri dengan ID nomor telepon untuk DM
+yang sama tidak menemukan riwayat tersebut. Pengiriman, forwarding,
+publikasi Status, dan perubahan grup dijalankan pada tes sintetis.
+
+Kandidat pengetikan dan gaya bicara lulus **721 tes Python, 17 subtes,
+93 tes Rust, dan 7 tes Baileys**. Tujuh tes Rust opt-in dilewati.
+Paket macOS arm64 dibangun ulang dan cocok dengan checksum sumbernya.
+Tampilan indikator mengetik di ponsel masih perlu diamati.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak

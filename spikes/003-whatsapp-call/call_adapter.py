@@ -41,8 +41,14 @@ CALL_PROMPT = (
     'Entri riwayat bertanda whatsapp_call berasal dari panggilan sebelumnya. '
     'Ikuti bahasa dan alur percakapan pemilik akun dengan wajar. '
     'Saat berbicara, tanggapi dengan hangat dan ekspresif sesuai suasana obrolan. '
+    'Mulai dengan jawaban atau tindakan yang diminta. '
+    'Lewati pembuka yang hanya menyatakan bahwa kamu paham atau mengulang ucapan pemilik. '
+    'Untuk pekerjaan yang jelas, sebut singkat rencanamu sekali jika berguna. '
+    'Sebut tindakan dan tujuan yang diminta secara konkret, tanpa sekadar berjanji akan memberi kabar. '
+    'Misalnya, saat diminta mencari sesuatu dan mengirimnya ke WhatsApp, '
+    'kamu bisa berkata dengan gayamu sendiri, seperti "Aku cari dulu, lalu aku kirim ke WhatsApp." '
     'Ceritakan apa yang sedang kamu kerjakan dengan sudut pandang orang pertama, '
-    'sesuai status yang sudah terkonfirmasi. '
+    'sesuai status yang sudah terkonfirmasi. Sebut pekerjaan selesai atau hasil terkirim hanya jika terbukti. '
     'Pakai cara bicaramu sendiri. Rangkai informasi progres dan hasil menjadi jawaban lisan yang alami, '
     'tanpa membacakan label teknis, data mentah, atau menjelaskan pembagian kerja internal. '
     'Gunakan konteks percakapan bersama, termasuk DM, saat relevan. Biarkan pemilik akun menentukan topik pembuka. '
@@ -64,7 +70,6 @@ CALL_PROMPT = (
     'Sebutkan bagian baru dan luruskan perubahan. Jika pemilik akun minta ulang, sampaikan kembali. '
     'Teruskan perubahan arahan untuk pekerjaan yang sedang berjalan, dan mulai tugas hanya '
     'untuk permintaan baru yang membutuhkan alat atau pemeriksaan. '
-    'Kalau berguna untuk percakapan, tanggapi dengan kata-katamu sendiri sebelum mulai mengerjakan. '
     'Setelah selesai menjawab, beri ruang pemilik untuk bicara. Jangan ulangi jawaban atau '
     'laporkan perubahan status rutin tanpa diminta. Sampaikan hasil baru atau kendala yang perlu ditangani. '
     'Sampaikan hasil sesuai yang tersedia; status pekerjaan selesai tidak mengonfirmasi pesan terkirim. '
@@ -1805,7 +1810,7 @@ class LiveCall:
         if not turn.is_set():
             # V3 can wait for this acknowledgment before it closes the user's transcript.
             released_early = await self.append_handoff(
-                item_id, 'Lanjutkan percakapan dengan wajar. Jangan menjanjikan pekerjaan yang belum diterima.',
+                item_id, 'Jika perlu merespons, jawab inti ucapan pemilik langsung dari konteks.',
                 channel='commentary',
             )
             try:
@@ -2184,7 +2189,7 @@ class LiveCall:
         if not released_early:
             result, acknowledged = await asyncio.gather(
                 submit,
-                self.append_handoff(item_id, 'Tanggapi permintaan ini dengan wajar dan tetap ikuti alur percakapan.',
+                self.append_handoff(item_id, 'Permintaan sedang diperiksa.',
                                     channel='commentary'),
             )
         else:
@@ -2202,6 +2207,8 @@ class LiveCall:
             provisional = status in {'pending', 'queued', 'started', 'unknown'}
             already_replied = self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started
             audible = current and (not provisional or not already_replied)
+            if audible and status in {'pending', 'queued'}:
+                text += ' Sebut singkat tindakan dan tujuan yang diminta pemilik dengan kata-katamu sendiri.'
             acknowledged = await self.append_handoff(
                 item_id, text, channel='speakable' if audible else 'commentary',
                 audio_turn=turn_id if audible else None,

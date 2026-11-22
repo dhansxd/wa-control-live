@@ -307,8 +307,9 @@ def test_spoken_result_reuses_native_image_and_file_extraction(tmp_path):
     assert result == 'Periksa DM untuk memastikan lampirannya diterima.\nIni hasilnya.'
 
 
-def test_call_uses_the_dm_whose_context_it_opened(tmp_path):
+def test_call_uses_the_dm_whose_context_it_opened(tmp_path, monkeypatch):
     gateway = FakeGateway()
+    monkeypatch.setattr(live_agent, '_read_persona', lambda _home: None)
 
     context = run(tmp_path, {'action': 'context'}, gateway)
     assert context == {'status': 'ready', 'session_id': 'session-a',
@@ -378,8 +379,9 @@ def test_context_does_not_publish_history_when_route_changes_during_the_read(tmp
 
 
 @pytest.mark.parametrize(('soul', 'expected'), [
-    (None, None),
-    ('[BLOCKED: SOUL.md contained potential prompt injection.]', None),
+    (None, 'Native Hermes identity'),
+    ('', 'Native Hermes identity'),
+    ('[BLOCKED: SOUL.md contained potential prompt injection.]', 'Native Hermes identity'),
     ('Persona text. ' * 400, ('Persona text. ' * 400)[:4000].rstrip()),
 ])
 def test_context_uses_only_the_verified_profiles_persona(tmp_path, monkeypatch, soul, expected):
@@ -398,7 +400,7 @@ def test_context_uses_only_the_verified_profiles_persona(tmp_path, monkeypatch, 
         return (home_override / 'SOUL.md').read_text(encoding='utf-8')
 
     monkeypatch.setitem(sys.modules, 'agent.prompt_builder',
-                        SimpleNamespace(load_soul_md=load_soul_md))
+                        SimpleNamespace(load_soul_md=load_soul_md, DEFAULT_AGENT_IDENTITY='Native Hermes identity'))
     gateway = FakeGateway()
 
     context = run(home, {'action': 'context'}, gateway)
@@ -1112,8 +1114,9 @@ def test_recall_reads_the_current_dm_without_submitting_a_turn(tmp_path):
 @pytest.mark.parametrize('existing,action,calls', [
     (False, 'context', 1), (True, 'context', 0), (False, 'work', 0),
 ])
-def test_initial_call_creates_a_missing_gateway_route_only_for_context(tmp_path, existing, action, calls):
+def test_initial_call_creates_a_missing_gateway_route_only_for_context(tmp_path, monkeypatch, existing, action, calls):
     gateway = FakeGateway()
+    monkeypatch.setattr(live_agent, '_read_persona', lambda _home: None)
     gateway.active_session = 'session-a' if existing else None
     attempts = []
 

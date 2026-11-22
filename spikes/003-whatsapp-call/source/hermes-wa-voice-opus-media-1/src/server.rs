@@ -192,6 +192,43 @@ async fn get_owner_messages(
     Ok(Json(page).into_response())
 }
 
+async fn owner_destination(bridge: &Bridge, client: &Client, chat_id: &str) -> Result<Jid, ApiError> {
+    let destination = chat_id
+        .parse::<Jid>()
+        .ok()
+        .filter(|jid| jid.to_non_ad().to_string() == chat_id)
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "non-device chat JID is required"))?;
+    if !owner_chat::owner_address(client, &destination, &bridge.cfg.owner).await {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "destination is not the verified owner",
+        ));
+    }
+    require_owner_transport(bridge)?;
+    Ok(destination)
+}
+
+#[derive(Deserialize)]
+struct OwnerChat {
+    chat_id: String,
+}
+
+async fn send_owner_typing(
+    State(bridge): State<Arc<Bridge>>,
+    headers: HeaderMap,
+    Json(body): Json<OwnerChat>,
+) -> ApiResult {
+    authorize(&bridge, &headers)?;
+    let client = require_owner_transport(&bridge)?;
+    let destination = owner_destination(&bridge, client, &body.chat_id).await?;
+    client
+        .chatstate()
+        .send_composing(&destination)
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "WhatsApp typing update unavailable"))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 #[derive(Deserialize)]
 struct OwnerReply {
     chat_id: String,
@@ -208,19 +245,7 @@ async fn send_owner_message(
     if body.text.trim().is_empty() {
         return Err(error(StatusCode::BAD_REQUEST, "nonempty text is required"));
     }
-    let destination = body
-        .chat_id
-        .parse::<Jid>()
-        .ok()
-        .filter(|jid| jid.to_non_ad().to_string() == body.chat_id)
-        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "non-device chat JID is required"))?;
-    if !owner_chat::owner_address(client, &destination, &bridge.cfg.owner).await {
-        return Err(error(
-            StatusCode::FORBIDDEN,
-            "destination is not the verified owner",
-        ));
-    }
-    require_owner_transport(&bridge)?;
+    let destination = owner_destination(&bridge, client, &body.chat_id).await?;
     let id = client.generate_message_id();
     let ack = client.wait_for_node(NodeFilter::tag("ack").attr("id", id.as_str()));
     let request = SendRequest::new(&destination, wa::Message::text(body.text))
@@ -288,6 +313,7 @@ pub async fn serve(bridge: Arc<Bridge>) -> anyhow::Result<()> {
             "/owner/messages",
             get(get_owner_messages).post(send_owner_message),
         )
+        .route("/owner/typing", post(send_owner_typing))
         .with_state(bridge);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     log::info!("API listening on http://{addr}");
