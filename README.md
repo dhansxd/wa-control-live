@@ -15,8 +15,8 @@ Untuk melanjutkan proyek dari clone atau sesi baru, mulai dari
 
 ## Install dan pairing
 
-Gunakan Hermes Agent di macOS Apple Silicon dengan Node.js 22.13+ dan npm.
-Setujui dependensi Python dan Node pada prompt resmi Hermes. Sidecar
+Gunakan Hermes Agent di macOS Apple Silicon. Setujui dependensi Python
+dan Node pada prompt resmi Hermes. Sidecar
 macOS arm64 sudah ada di paket Git dan diverifikasi oleh plugin.
 
 ```sh

@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from .runtime import ServiceStopped, activation_ids, active_install, request_worker, runtime_path, socket_dir
+from .runtime import ServiceStopped, activation_ids, active_install, node_executable, request_worker, runtime_path, socket_dir
 from .settings import JID, account_id, hermes_command, phone_number, private_dir, read_json, write_json
 
 
@@ -44,11 +44,8 @@ def add_arguments(parser):
 
 def prepare(entry):
     source = Path(entry).parent
-    node = shutil.which("node")
-    if not node:
-        raise RuntimeError("Install Node.js 22.13+ and npm before setup.")
     probe = subprocess.run(
-        [node, "--input-type=module", "--eval", "import('node:sqlite'); await import('baileys'); await import('qrcode-terminal');"],
+        [node_executable(), "--input-type=module", "--eval", "import('node:sqlite'); await import('baileys'); await import('qrcode-terminal');"],
         cwd=source, capture_output=True, timeout=15, check=False,
     )
     if probe.returncode:
