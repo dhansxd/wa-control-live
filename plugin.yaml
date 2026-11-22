@@ -11,10 +11,18 @@ tags: [whatsapp, voice, calls, chatbot]
 platforms: [macos]
 requires_hermes: ">=0.22.7"
 requires_auth: [openai-codex]
+python_dependencies:
+  - "aiohttp>=3.14.5,<4"
+  - "aiortc==1.16.0"
+  - "av>=16.1,<19"
 provides_tools: [whatsapp_call_now, whatsapp_live_provider, whatsapp_control]
 provides_hooks: [pre_llm_call, post_gateway_admission, on_session_reset]
 provides_middleware: [tool_execution]
 config_schema:
+  stock_profile:
+    type: str
+    default: ""
+    description: Optional Hermes profile to read the existing WhatsApp bot identity from during setup.
   live_enabled:
     type: bool
     default: true

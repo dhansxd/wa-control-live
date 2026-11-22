@@ -3,7 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -36,13 +36,16 @@ def test_registration_uses_only_the_configured_bot_and_one_profile_transport(tmp
                           state=SimpleNamespace(data_dir=tmp_path),
                           register_platform=lambda **kwargs: calls.append(kwargs) or object(),
                           register_rpc=lambda name, handler: None, on_unload=on_unload)
-    register_gateway(ctx, *configured_pair(ctx))
+    transport_command = Mock()
+    register_gateway(ctx, *configured_pair(ctx), transport_command=transport_command)
     registration, = calls
     assert registration["name"] == "whatsapp"
     assert "trusted_inbound" not in registration
     adapter = registration["adapter_factory"](PlatformConfig())
     assert (adapter.platform, adapter.owner, adapter.bot) == (Platform.WHATSAPP, OWNER, BOT)
     assert adapter.token_path == tmp_path / "unified" / "adapter.token"
+    assert adapter.transport_command is transport_command
+    transport_command.assert_not_called()
     settings["bot_number"] = OWNER
     with pytest.raises(ValueError, match="different numbers"):
         configured_pair(ctx)
@@ -388,7 +391,10 @@ def test_same_authenticated_sidecar_receives_owner_dm_and_sends_reply(tmp_path, 
         port = runner.addresses[0][1]
         token_file = tmp_path / "adapter.token"
         token_file.write_text(TOKEN, encoding="utf-8")
-        adapter = WhatsAppLiveAdapter(PlatformConfig(), OWNER, BOT, token_file, endpoint=f"http://127.0.0.1:{port}")
+        token_file.with_name("paired.json").touch()
+        transport_command = Mock()
+        adapter = WhatsAppLiveAdapter(PlatformConfig(), OWNER, BOT, token_file,
+                                      endpoint=f"http://127.0.0.1:{port}", transport_command=transport_command)
         mark = []
         monkeypatch.setattr(adapter, "_mark_connected", lambda: mark.append(adapter.send_path_degraded))
         monkeypatch.setattr(adapter, "_mark_disconnected", lambda: None)
@@ -420,7 +426,79 @@ def test_same_authenticated_sidecar_receives_owner_dm_and_sends_reply(tmp_path, 
                                 {"chat_id": LID, "text": "Lanjut di percakapan yang sama."}]
         finally:
             await adapter.disconnect()
+            transport_command.assert_not_called()
             wait_for_close.set()
             await runner.cleanup()
+
+    asyncio.run(exercise())
+
+
+def test_gateway_lazily_starts_the_paired_transport_and_stops_its_own_child(tmp_path, monkeypatch):
+    import whatsapp_gateway as gateway
+
+    async def exercise():
+        started = asyncio.Event()
+        token_path = tmp_path / "adapter.token"
+        token_path.write_text(TOKEN, encoding="utf-8")
+        argv = ["hermes", "-p", "paired", "wa-control-live", "serve"]
+        env = {"HERMES_HOME": str(tmp_path)}
+        command = Mock(return_value=(argv, env))
+        process = Mock(poll=Mock(return_value=None))
+
+        def launch(*args, **kwargs):
+            started.set()
+            return process
+
+        popen = Mock(side_effect=launch)
+        monkeypatch.setattr(gateway.subprocess, "Popen", popen)
+
+        @asynccontextmanager
+        async def unavailable(*args, **kwargs):
+            raise gateway.aiohttp.ClientConnectorError(None, OSError("not listening"))
+            yield
+
+        http = SimpleNamespace(get=unavailable, close=AsyncMock())
+        monkeypatch.setattr(gateway.aiohttp, "ClientSession", Mock(return_value=http))
+        adapter = WhatsAppLiveAdapter(PlatformConfig(), OWNER, BOT, token_path, transport_command=command)
+        adapter._ensure_transport()
+        popen.assert_not_called()
+
+        token_path.with_name("paired.json").touch()
+        try:
+            assert await adapter.connect()
+            await asyncio.wait_for(started.wait(), 2)
+            assert await adapter.connect()
+            popen.assert_called_once_with(argv, env=env, stdin=gateway.subprocess.DEVNULL,
+                                          start_new_session=True)
+        finally:
+            await adapter.disconnect()
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once()
+        http.close.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+def test_gateway_retries_failed_transport_and_honors_clean_stop(tmp_path, monkeypatch):
+    import whatsapp_gateway as gateway
+
+    async def exercise():
+        token_path = tmp_path / "adapter.token"
+        token_path.with_name("paired.json").touch()
+        command = Mock(return_value=(["hermes"], {}))
+        failed = Mock(poll=Mock(return_value=1))
+        stopped = Mock(poll=Mock(return_value=0))
+        popen = Mock(side_effect=[failed, stopped])
+        monkeypatch.setattr(gateway.subprocess, "Popen", popen)
+        monkeypatch.setattr(gateway, "_TRANSPORT_RETRY_SECONDS", 0)
+        adapter = WhatsAppLiveAdapter(PlatformConfig(), OWNER, BOT, token_path, transport_command=command)
+        adapter._ensure_transport()
+        adapter._ensure_transport()
+        adapter._ensure_transport()
+        adapter._ensure_transport()
+        assert popen.call_count == 2
+        await adapter.disconnect()
+        failed.terminate.assert_not_called()
+        stopped.terminate.assert_not_called()
 
     asyncio.run(exercise())

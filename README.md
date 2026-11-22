@@ -13,107 +13,41 @@ rilis. Lihat [status fitur, batas verifikasi, dan pekerjaan tersisa](STATUS.md).
 Untuk melanjutkan proyek dari clone atau sesi baru, mulai dari
 [HANDOFF.md](HANDOFF.md) dan [aturan proyek](AGENTS.md).
 
-## Setup plugin
+## Install dan pairing
 
-Siapkan macOS Apple Silicon, Hermes Agent v0.23.1 sebagai versi acuan uji,
-Node.js 22.13 atau lebih baru, npm, Python 3.12, Rust 1.94 atau lebih baru,
-Git, CMake, dan Xcode Command Line Tools. Pemuatan gateway dan tool di
-profil ini memakai `plugins.isolation: in_process`. Wizard membangun sidecar
-dari sumber dan dependensi Rust yang dipin. Tinjau permintaan dependensi dari
-Hermes saat instalasi. [Panduan plugin Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins#managing-plugins)
+Gunakan Hermes Agent di macOS Apple Silicon dengan Node.js 22.13+ dan npm.
+Setujui dependensi Python dan Node pada prompt resmi Hermes. Sidecar
+macOS arm64 sudah ada di paket Git dan diverifikasi oleh plugin.
 
 ```sh
 hermes plugins install dhansxd/wa-control-live --enable
-hermes wa-control-live setup
-```
-
-Wizard mendeteksi nomor bot dari pairing WhatsApp bawaan Hermes yang ada.
-Untuk mengambil identitas bot dari profil Hermes lain, misalnya profil
-`default`, jalankan `hermes -p PROFIL_UJI wa-control-live setup --stock-profile default`.
-Wizard membaca identitas yang sudah tertaut dan menyiapkan perangkat tertaut
-baru untuk plugin. Jika profil baru belum punya bot terpasang, wizard
-meminta nomor bot untuk diverifikasi saat scan.
-
-Konfirmasi kontak yang akan diberi izin DM dan menelepon bot. Wizard bisa
-menawarkan kontak dari konfigurasi WhatsApp lama dan meminta konfirmasi
-sebelum memberinya akses di profil tujuan. Pindai QR Live menggunakan
-**Perangkat Tertaut** pada akun bot yang terdeteksi. Jika penautan ditunda,
-jalankan `hermes wa-control-live pair`.
-
-Jalankan layanan plugin di satu terminal dan gateway di terminal lain.
-
-```sh
-hermes wa-control-live serve
-hermes gateway run  # terminal lain
-```
-
-Untuk gateway yang sudah dikelola sebagai layanan, muat ulang dengan
-`hermes gateway restart`. Gunakan `hermes -p NAMA_PROFIL` pada setiap perintah
-untuk memilih profil yang sama. Sesudah gateway siap, kirim DM dari nomor
-pemilik ke bot. [Panduan gateway Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)
-
-Saat layanan plugin berjalan, gunakan `hermes whatsapp-control pair pribadi`
-untuk akun tambahan. Identitas akun diambil dari WhatsApp saat QR dipindai.
-Label `pribadi` dapat diganti. Jika akun yang memindai adalah bot yang
-terdeteksi, penautan Control ditolak dan QR Live tetap dipakai untuk bot.
-
-Untuk audio Live, pakai login atau secret Hermes yang kompatibel, pilih
-provider dan kredensial secara manual, atau tunda penyiapannya sambil memakai
-Control dan DM lewat wizard. Opsi Codex CLI memerlukan executable `codex` dan
-login di CLI tersebut. Opsi broker `hermes-realtime` memakai login Codex di
-profil Hermes. Provider dengan API key memakai secret yang dipilih di setup.
-API key baru dimasukkan tanpa ditampilkan dan disimpan oleh Hermes di profil
-tersebut. Jalankan wizard lagi untuk menyiapkan Live nanti atau menambah
-pilihan provider. Jalankan ulang `serve` setelah konfigurasi Live berubah.
-
-**Status wizard.** Alur setup diuji lokal dengan simulasi build dan penautan,
-termasuk pilihan tanpa Codex. Kompilasi release dari clone bersih dan
-penautan melalui wizard pada perangkat nyata masih perlu diverifikasi.
-
-### Setup manual dengan sidecar yang sudah dibangun
-
-Untuk memberikan binary yang sudah dibangun, izinkan nomor pemilik untuk DM
-dan tambahkan pengaturan berikut di `config.yaml` profil yang dipilih.
-
-```yaml
-plugins:
-  isolation: in_process
-  entries:
-    wa-control-live:
-      settings:
-        unified_gateway: true
-        owner_number: "NOMOR_PEMILIK"
-        bot_number: "NOMOR_BOT_HERMES"
-```
-
-Jalankan perintah build dari root clone repositori ini pada commit yang akan
-dipasang. Jalur manual dengan `--sidecar` mengasumsikan Codex CLI jika
-konfigurasi `live` belum ada. Gunakan wizard di atas untuk instalasi baru yang
-menunda Live atau memilih provider lain.
-Saat instalasi, izinkan Hermes menyiapkan dependensi Node, atau jalankan `npm ci`
-di direktori instalasi plugin.
-
-```sh
-WA_PLUGIN_COMMIT=$(git rev-parse HEAD)
-WA_SIDECAR_SRC=spikes/003-whatsapp-call/source/hermes-wa-voice-opus-media-1
-python3 "$WA_SIDECAR_SRC/prepare_whatsapp_rust.py"
-cargo build --locked --release --manifest-path "$WA_SIDECAR_SRC/Cargo.toml"
-WA_SIDECAR="$PWD/$WA_SIDECAR_SRC/target/release/hermes-wa-voice"
-WA_SIDECAR_SHA=$(shasum -a 256 "$WA_SIDECAR" | cut -d ' ' -f 1)
-
-hermes plugins install dhansxd/wa-control-live --ref "$WA_PLUGIN_COMMIT" --enable
-hermes wa-control-live setup --sidecar "$WA_SIDECAR" --sidecar-sha256 "$WA_SIDECAR_SHA"
 hermes wa-control-live pair
-hermes wa-control-live serve
 ```
 
-Saat pairing, pindai QR dari akun bot WhatsApp pada profil itu. Plugin
-memeriksa hash binary dan menyimpan sesi perangkat tertaut, dependensi,
-serta log di direktori plugin yang ditetapkan Hermes di profil itu. Jalankan
-`hermes wa-control-live status` di terminal lain untuk melihat lokasi data dan
-koneksi layanan. Panggilan percakapan dan hasil tugas dapat diuji dari nomor
-pemilik.
-Jalankan ulang `serve` setelah mengubah izin WhatsApp di profil Hermes.
+Plugin mendeteksi bot dari pairing WhatsApp Hermes jika tersedia. Konfirmasi
+kontak pemilik, lalu buka **Perangkat Tertaut** di WhatsApp bot untuk memindai
+QR Live. Satu scan ini mengaktifkan DM pemilik, Control, dan telepon pada akun
+bot. Jalankan gateway profil Hermes seperti biasa. Plugin memulai layanannya
+bersama gateway. Ikuti petunjuk restart jika Hermes menampilkannya.
+[Panduan plugin Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins#managing-plugins)
+
+Untuk akun tambahan, jalankan `hermes whatsapp-control pair pribadi` saat
+gateway berjalan. Pindai QR dari akun yang ingin dikontrol. Plugin membaca
+identitas akun dari hasil scan. Label `pribadi` bisa diganti. Jika akun yang
+memindai adalah bot, plugin mengarahkanmu kembali ke QR Live.
+
+Pakai profil yang sama untuk setiap perintah dengan `hermes -p NAMA_PROFIL`.
+Jika identitas bot sudah tertaut di profil lain, gunakan
+`hermes -p PROFIL_UJI wa-control-live pair --stock-profile default`.
+Sebelum mengaktifkan gateway kedua untuk bot yang sama, tentukan profil
+yang akan menangani DM bot.
+
+`hermes wa-control-live setup` tersedia untuk mengubah provider audio,
+mengatur izin pemilik, atau menunda scan. Pairing pertama memakai Codex CLI
+jika tersedia dan provider belum dipilih. Opsi Codex memakai login CLI itu.
+Opsi broker Realtime memakai login Codex profil Hermes. API key yang dimasukkan
+disimpan lewat mekanisme secret Hermes. Lihat kesiapan dengan
+`hermes wa-control-live status`.
 
 ### Pilih provider Live
 
@@ -275,15 +209,13 @@ melanjutkan sesi DM aktif.
 menghentikan proses yang dimiliki plugin. Ikuti arahan reload gateway dari
 Hermes agar registrasi gateway ikut diperbarui.
 Untuk menjalankannya lagi, gunakan
-`hermes plugins enable wa-control-live` lalu `hermes wa-control-live serve`.
+`hermes plugins enable wa-control-live` dan ikuti petunjuk gateway Hermes.
 
-Sebelum memperbarui kode, hentikan layanan plugin dengan
-`hermes wa-control-live cleanup`. Untuk instalasi yang mengikuti cabang,
-jalankan `hermes plugins update wa-control-live`. Untuk instalasi yang dipin,
-pilih SHA lengkap yang baru dengan
+Untuk instalasi yang mengikuti cabang, jalankan
+`hermes plugins update wa-control-live`. Untuk instalasi yang dipin, pilih SHA
+lengkap yang baru dengan
 `hermes plugins install dhansxd/wa-control-live --force --ref SHA_LENGKAP --enable`.
-Jalankan setup untuk menyiapkan sidecar dari revisi baru, lalu mulai kembali
-layanan dan muat ulang gateway pada profil yang sama.
+Runtime mengikuti revisi plugin yang terpasang dan pairing yang masih valid.
 
 Untuk berhenti sementara dan menyimpan data, jalankan
 `hermes wa-control-live cleanup`. Untuk menghapus kode plugin dan
@@ -340,13 +272,10 @@ DM pemilik, Control, dan telepon Live pada nomor bot Hermes. Koneksi Baileys
 melayani akun tambahan. Chatbot tamu memakai pengaturan dan riwayat
 percakapannya sendiri dengan akses media sesuai kebijakan akun.
 
-Aktifkan `unified_gateway` dan isi nomor pemilik serta nomor bot di
-konfigurasi plugin. Setup kandidat menerima `--sidecar-sha256` dari build
-lokal. Instalasi Hermes dapat menyiapkan dependensi Node dari lockfile di
-root. `hermes wa-control-live serve` menjalankan transport dan service Control
-untuk profil Hermes aktif. Perintah `hermes whatsapp-control` memakai service
-yang sama untuk pengaturan akun dan kebijakan chatbot. Pengaturan dan riwayat
-Control dari instalasi lama di profil yang sama tetap tersedia.
+Pairing menyimpan konfigurasi akun bot pada profil Hermes aktif. Adapter
+gateway menjalankan transport dan service Control untuk profil itu. Perintah
+`hermes whatsapp-control` memakai service yang sama untuk pengelolaan akun
+dan kebijakan chatbot.
 
 Panggilan Live melanjutkan sesi WhatsApp pemilik yang aktif di Hermes.
 Integrasi sesi memakai penyimpanan internal Hermes, termasuk pemetaan rute
@@ -356,8 +285,8 @@ untuk kirim pesan atau Status tersimpan bersama ID operasinya. Status
 `accepted` berarti server mengonfirmasi pesan, sedangkan visibilitas ke
 penerima perlu diperiksa pada perangkat penerima.
 
-Git menyimpan source, tes, dependency lock, dan dokumentasi. State autentikasi,
-identitas nomor, rekaman panggilan, laporan runtime, binary, dan lingkungan lokal
+Git menyimpan source, tes, dependency lock, sidecar rilis, dan dokumentasi.
+State autentikasi, identitas nomor, rekaman panggilan, laporan runtime, dan lingkungan lokal
 disimpan terpisah melalui `.gitignore`. Source dan fixture audio upstream
 tersedia di `spikes/003-whatsapp-call/source/hermes-wa-voice-opus-media-1`.
 

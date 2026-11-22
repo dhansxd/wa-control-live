@@ -1,7 +1,8 @@
-"""Build the release sidecar from the source shipped with the plugin."""
+"""Verify the bundled sidecar or build one from the pinned source."""
 
 from contextlib import contextmanager
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
@@ -39,6 +40,30 @@ def source_checksum(source):
         digest.update(path.relative_to(source).as_posix().encode() + b"\0")
         digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
+
+
+def packaged_sidecar(source: Path) -> tuple[Path, str]:
+    """Verify the release binary against the installed plugin revision."""
+    if (platform.system(), platform.machine()) != ("Darwin", "arm64"):
+        raise RuntimeError("The bundled WhatsApp sidecar requires macOS on Apple Silicon.")
+    directory = Path(__file__).resolve().parent / "sidecar" / "darwin-arm64"
+    binary = directory / "hermes-wa-voice"
+    manifest = directory / "build.json"
+    if any(path.is_symlink() for path in (directory.parent, directory, binary, manifest)):
+        raise RuntimeError("The bundled WhatsApp sidecar must use regular files in the plugin package.")
+    if not manifest.is_file() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise RuntimeError("The bundled WhatsApp sidecar is incomplete. Reinstall WA Control & Live.")
+    try:
+        build = json.loads(manifest.read_text(encoding="utf-8"))
+        with binary.open("rb") as handle:
+            checksum = hashlib.file_digest(handle, "sha256").hexdigest()
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Could not read the bundled WhatsApp sidecar or its checksum manifest.") from exc
+    if not isinstance(build, dict) or build.get("binary_sha256") != checksum:
+        raise RuntimeError("The bundled WhatsApp sidecar checksum does not match its manifest.")
+    if build.get("source_sha256") != source_checksum(source):
+        raise RuntimeError("The bundled WhatsApp sidecar source checksum does not match the installed source.")
+    return binary, checksum
 
 
 @contextmanager

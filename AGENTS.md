@@ -38,8 +38,10 @@ arahan terbaru pemilik, perbarui aturan dan kriteria penerimaannya.
   atau konteks pribadi pemilik. Handoff mengikuti maksud pengirim dalam bahasa
   natural dan durasinya bisa diatur.
 - Utamakan pengaturan harian melalui permintaan natural ke Hermes atau slash
-  command yang relevan. Setup awal dan penautan dari terminal dapat dipakai
-  pada profil Hermes baru dengan kredensial dan provider pilihan pengguna.
+  command yang relevan. Setelah instalasi GitHub dan persetujuan dependensi
+  asli Hermes, pengguna langsung menjalankan perintah pairing plugin.
+  Kemas runtime platform yang didukung dalam plugin dan gunakan lifecycle
+  asli Hermes untuk menjalankan gateway dan mengelola plugin.
 - Ikuti lifecycle asli Hermes dan pakai API publik jika tersedia. Untuk
   integrasi sesi yang membutuhkan API internal, batasi pemakaiannya pada
   bagian tersebut, dokumentasikan, dan uji pada versi Hermes yang didukung.

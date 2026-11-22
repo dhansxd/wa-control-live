@@ -99,16 +99,16 @@ Target pengalaman instalasi dari repositori publik Hermes melalui terminal:
 
 ```sh
 hermes plugins install OWNER/REPO --enable
-hermes wa-control-live setup
+hermes wa-control-live pair
 ```
 
-Wizard memakai profil yang dipilih, memeriksa platform dan dependensi yang
-diperlukan, lalu menyiapkan sidecar yang cocok. Sediakan artefak rilis yang cocok
-dengan sumber dan checksum, atau instruksi build dari sumber untuk platform
-yang memang didukung. Wizard meminta identitas bot dan pemilik, menampilkan QR
-nomor A, memeriksa kecocokan nomor, dan menawarkan akun tambahan dengan label
-pilihan pengguna. Penambahan akun juga bisa dilakukan nanti. Wizard menawarkan
-setup Live saat itu atau nanti, lalu menunjukkan cara menjalankan layanan.
+Paket Git membawa sidecar macOS arm64 yang diverifikasi terhadap checksum
+dan sumber paket. Hermes menyiapkan dependensi Python dan Node saat instalasi
+dengan persetujuan standar. Perintah `pair` mendeteksi bot Hermes,
+mengonfirmasi izin pemilik, lalu menampilkan QR Live untuk akun A. Plugin
+menjalankan transport yang dimiliki adapter gateway setelah akun A tertaut.
+`whatsapp-control pair <label>` menampilkan QR akun tambahan di profil yang
+sama. `setup` dipakai bila perlu mengubah pilihan audio atau menunda scan.
 
 Setup menawarkan **pakai konfigurasi Hermes** dan **siapkan Live manual**.
 Pengguna memilih provider dan model yang mendukung suara Live, suara bila
@@ -156,7 +156,7 @@ perangkat tertaut, dan data runtime miliknya.
 
 | Tindakan | Perintah dan hasil yang diharapkan |
 | --- | --- |
-| Install | `hermes plugins install OWNER/REPO --enable` memasang dari GitHub dan meminta aktivasi. Setelah persetujuan dependensi dan aktivasi, jalankan `hermes wa-control-live setup` untuk setup plugin. Opsi `--no-enable` memasang dalam keadaan nonaktif. |
+| Install | `hermes plugins install OWNER/REPO --enable` memasang paket dari GitHub lewat prompt dependensi Hermes. Petunjuk bawaan instalasi menampilkan `hermes wa-control-live pair`. Opsi `--no-enable` memasang dalam keadaan nonaktif. |
 | Enable | `hermes plugins enable wa-control-live` memulihkan akses plugin di profil. Saat layanan dijalankan kembali, gunakan pairing yang masih valid. |
 | Disable | `hermes plugins disable wa-control-live` menonaktifkan integrasi plugin. Launcher menghentikan proses yang dimiliki plugin. Simpan konfigurasi dan pairing agar bisa dipakai saat diaktifkan kembali. |
 | Update | `hermes plugins update wa-control-live` mengikuti sumber instalasi yang tidak dipin. Untuk instalasi yang dipin, gunakan `hermes plugins install OWNER/REPO --force --ref <SHA-40-karakter>` untuk memilih revisi baru. Verifikasi pairing dan pengaturan sesudah update. |

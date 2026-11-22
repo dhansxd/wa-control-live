@@ -2,6 +2,8 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -97,6 +99,41 @@ def test_unified_profile_only_reopens_the_verified_local_build(tmp_path):
     binary.write_bytes(b'tampered')
     with pytest.raises(ValueError, match='checksum mismatch'):
         launch.prepare_profile(**args)
+
+
+def test_managed_adapter_gets_hermes_dependencies_and_preserves_arguments(tmp_path):
+    import launch
+
+    hermes_runtime = tmp_path / 'hermes'
+    hermes_runtime.mkdir()
+    dependencies = tmp_path / 'dependencies'
+    dependencies.mkdir()
+    (dependencies / 'voice_dependency.py').write_text('value = "managed"')
+    (hermes_runtime / 'hermes_bootstrap.py').write_text(
+        'import sys\n' + f'sys.path.insert(0, {str(dependencies)!r})\n'
+    )
+    stage = tmp_path / 'plugin'
+    stage.mkdir()
+    (stage / 'adapter_sibling.py').write_text('value = "sibling"')
+    script = stage / 'call_adapter.py'
+    script.write_text(
+        'import sys\n'
+        'import voice_dependency, adapter_sibling\n'
+        'print(voice_dependency.value, adapter_sibling.value, *sys.argv[1:])\n'
+    )
+    binary = tmp_path / 'sidecar'
+    binary.write_bytes(b'unified-candidate-fixture')
+    binary.chmod(0o700)
+    config = launch.prepare_profile(
+        owner='628111111111', bot='628222222222', private=tmp_path / 'state',
+        binary=binary, python=sys.executable, hermes_runtime=hermes_runtime,
+        unified_gateway=True, sidecar_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+    )
+    assert config['hermes_runtime'] == str(hermes_runtime)
+    command = launch._adapter_command(config, stage)
+    result = subprocess.run([*command, '--runs', 'with spaces'], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == 'managed sibling --runs with spaces'
+    assert launch._adapter_command({'python': '/legacy/python'}, stage) == ['/legacy/python', str(script)]
 
 
 def test_serve_refuses_unpaired_without_starting_children(tmp_path, monkeypatch):
