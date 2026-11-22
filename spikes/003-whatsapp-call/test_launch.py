@@ -22,6 +22,7 @@ def test_prepare_pins_binary_and_creates_private_isolated_state(tmp_path):
     token = (private/'adapter.token').read_text()
     assert len(token) >= 32
     env = sidecar_env(config, {'PATH':'/usr/bin','GEMINI_API_KEY':'never-inherit-key',
+                               'WA_CONTROL_LIVE_GATEWAY_PID':'123',
                               'OPENAI_API_KEY':'never-inherit-key','OPENAI_LIVE_BACKUP':'never-inherit-key',
                               'HERMES_API_KEY':'never-inherit-key','HWV_CONTEXT_URL':'http://upstream'},
                       live_settings={'providers': {
@@ -30,6 +31,7 @@ def test_prepare_pins_binary_and_creates_private_isolated_state(tmp_path):
                       }})
     assert env['GEMINI_API_KEY'] == token
     assert 'OPENAI_API_KEY' not in env and 'OPENAI_LIVE_BACKUP' not in env
+    assert 'WA_CONTROL_LIVE_GATEWAY_PID' not in env
     assert env['HWV_GEMINI_URL'] == 'ws://127.0.0.1:8797/live'
     assert env['HWV_DATA_DIR'] == str(private/'whatsapp')
     assert env['HERMES_API_KEY'] == env['HWV_CONTEXT_URL'] == ''
@@ -410,11 +412,13 @@ def test_launcher_waits_for_own_control_unlink_report_when_bot_logs_out(tmp_path
     monkeypatch.setattr(launch, 'sidecar_env', lambda _: {})
     monkeypatch.setattr(launch, 'read_health', lambda *_: {})
     monkeypatch.setattr(launch.os, 'umask', lambda *_: None)
+    monkeypatch.setenv('WA_CONTROL_LIVE_GATEWAY_PID', '123')
     probe = SimpleNamespace(setsockopt=lambda *_: None, bind=lambda *_: None)
     monkeypatch.setattr(launch.socket, 'socket', lambda: nullcontext(probe))
     children, waited, terminated = {}, [], []
 
-    def spawn(args, **_):
+    def spawn(args, *, env, **_):
+        assert 'WA_CONTROL_LIVE_GATEWAY_PID' not in env
         child = SimpleNamespace(name=args[0], pid=len(children)+100, returncode=None)
         child.poll = lambda: child.returncode
 

@@ -13,8 +13,10 @@ PATCHES = (
     "whatsapp-rust-playout.patch",
     "whatsapp-rust-relay-failover.patch",
     "whatsapp-rust-before-accept.patch",
+    "whatsapp-rust-owner-lid-proof.patch",
 )
 PATCHED_SHA256 = {
+    "src/client/lid_pn.rs": "7fcf7b25f064c1687332ff205fb12b553d5db24977b270a3e9077d3ab63999bc",
     "src/handlers/call.rs": "19da32e7ba8ac526fd84415d651b142bf579667ccff393f434920103232727d0",
     "src/voip/facade.rs": "ee59c19e2dcbb0879139db67a951378785585f90708568b67483f51478e27747",
     "src/voip_control/wacore_backend.rs": "1aa8bed29e8cd559ebc8441c4509b40e83462831683d9fce32d6bcd6af547fa9",

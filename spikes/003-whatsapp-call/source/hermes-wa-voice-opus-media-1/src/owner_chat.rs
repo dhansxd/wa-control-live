@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 use whatsapp_rust::prelude::*;
+use whatsapp_rust::wacore::iq::usync::LidQuerySpec;
 use whatsapp_rust::wacore::types::lid_pn::LearningSource;
 
 use crate::calls::Bridge;
@@ -148,21 +149,44 @@ pub async fn owner_address(client: &Client, jid: &Jid, owner: &str) -> bool {
     if !jid.is_lid() {
         return false;
     }
-    client
+    let Some(entry) = client
         .get_lid_pn_entry(jid)
         .await
         .ok()
         .flatten()
-        .is_some_and(|entry| {
-            entry.lid.as_ref() == jid.user.as_str()
-            && entry.phone_number.as_ref() == owner
-            // The peer fields here come from the authenticated WhatsApp stanza.
-            // Historic/bulk hints alone cannot authorize this address.
-            && matches!(entry.learning_source,
-                LearningSource::Usync | LearningSource::RecipientLatestLid |
-                LearningSource::DeviceNotification | LearningSource::PeerPnMessage |
-                LearningSource::PeerLidMessage)
-        })
+    else {
+        return false;
+    };
+    if entry.lid.as_ref() != jid.user.as_str() || entry.phone_number.as_ref() != owner {
+        return false;
+    }
+    if matches!(
+        entry.learning_source,
+        LearningSource::Usync
+            | LearningSource::RecipientLatestLid
+            | LearningSource::DeviceNotification
+            | LearningSource::PeerPnMessage
+            | LearningSource::PeerLidMessage
+    ) {
+        return true;
+    }
+    // Historical sync can suggest a candidate, but only a live lookup may
+    // confirm it when the current message or call omits an alternate phone.
+    let query = LidQuerySpec::new(vec![Jid::pn(owner)], format!("owner-{:016x}", rand::random::<u64>()));
+    let Ok(Ok(response)) = tokio::time::timeout(Duration::from_secs(4), client.execute(query)).await
+    else {
+        return false;
+    };
+    let [mapping] = response.lid_mappings.as_slice() else {
+        return false;
+    };
+    if mapping.lid != jid.user.as_str() || mapping.phone_number != owner {
+        return false;
+    }
+    client
+        .add_lid_pn_mapping(&mapping.lid, owner, LearningSource::Usync)
+        .await
+        .is_ok()
 }
 
 pub struct OwnerMessageObserver {
@@ -232,6 +256,17 @@ fn owner_candidate(message: &InboundMessage, owner: &str) -> Option<Jid> {
     Some(chat)
 }
 
+fn has_live_owner_phone(message: &InboundMessage, chat: &Jid, owner: &str) -> bool {
+    chat.is_lid()
+        && !message.info.is_offline
+        && message
+            .info
+            .source
+            .sender_alt
+            .as_ref()
+            .is_some_and(|alt| alt.is_pn() && alt.user == owner)
+}
+
 // A single worker preserves the event ordering across asynchronous mapping lookups.
 pub async fn retain_owner_messages(
     bridge: Arc<Bridge>,
@@ -244,6 +279,17 @@ pub async fn retain_owner_messages(
         let Some(chat) = owner_candidate(&message, &bridge.cfg.owner) else {
             continue;
         };
+        if has_live_owner_phone(&message, &chat, &bridge.cfg.owner) {
+            // The authenticated SenderPn on this direct, live stanza is
+            // stronger than an earlier history-only association.
+            let _ = client
+                .add_lid_pn_mapping(
+                    &chat.user,
+                    &bridge.cfg.owner,
+                    LearningSource::PeerLidMessage,
+                )
+                .await;
+        }
         if !owner_address(client, &chat, &bridge.cfg.owner).await || !account_ready(&bridge) {
             continue;
         }
@@ -297,6 +343,27 @@ mod tests {
             .info(Arc::new(info))
             .build();
         owner_candidate(&incoming, "15551110000")
+    }
+
+    #[test]
+    fn live_owner_phone_proof_excludes_history_missing_and_conflicting_alternates() {
+        let owner = Jid::pn("15551110000");
+        let lid = Jid::lid("99995551110000");
+        let stranger = Jid::pn("15552220000");
+        for (alternate, offline, expected) in [
+            (Some(owner.clone()), false, true),
+            (Some(owner.clone()), true, false),
+            (Some(stranger), false, false),
+            (None, false, false),
+        ] {
+            let mut info = live_dm(lid.clone(), lid.clone(), alternate);
+            info.is_offline = offline;
+            let incoming = InboundMessage::builder()
+                .message(Arc::new(wa::Message::text("hello")))
+                .info(Arc::new(info))
+                .build();
+            assert_eq!(has_live_owner_phone(&incoming, &lid, &owner.user), expected);
+        }
     }
 
     #[test]

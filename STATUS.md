@@ -77,6 +77,18 @@ Wizard `wa-control-live pair` menawarkan QR Control setelah QR bot selesai
 di terminal yang sama. Jika QR kedua gagal, pairing bot tetap tersimpan.
 Regresi kandidat lulus **711 tes Python dan 17 subtes**.
 
+Uji perangkat nyata di profil `default` menunjukkan dua kegagalan setelah
+pairing. Worker konteks Live mewarisi pemeriksaan PID proses utama dan
+ditolak sebelum membuka provider. Pada DM, asosiasi nomor pemilik dari
+sinkronisasi historis tidak bisa diperbarui ketika bukti identitas baru
+tiba. Perbaikan membatasi pemeriksaan PID ke launcher dan mengonfirmasi
+asosiasi pemilik melalui bukti WhatsApp yang masih berlaku. Uji terpisah
+membuka dan menutup sesi Codex Realtime melalui WebRTC dengan login
+ChatGPT. Worker konteks juga berhasil membuka sesi DM yang sudah ada.
+Regresi lulus **711 tes Python, 17 subtes, 7 tes Baileys, dan 87 tes Rust**.
+Tujuh tes provider opt-in dilewati dalam suite Rust. Uji ulang DM dan
+panggilan WhatsApp dilakukan pada perangkat setelah paket baru dipasang.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak

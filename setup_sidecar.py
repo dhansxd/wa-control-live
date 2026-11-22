@@ -17,6 +17,7 @@ _BUILD_FILES = (
     "Cargo.lock",
     "prepare_whatsapp_rust.py",
     "whatsapp-rust-before-accept.patch",
+    "whatsapp-rust-owner-lid-proof.patch",
     "whatsapp-rust-playout.patch",
     "whatsapp-rust-relay-failover.patch",
 )

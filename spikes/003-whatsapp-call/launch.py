@@ -118,7 +118,7 @@ def sidecar_env(config, environ=None, *, live_settings=None):
                             for account in provider.get('accounts', {}).values()
                             if 'secret_env' in account)
     for key in list(env):
-        if key.startswith('HWV_') or key in private_keys:
+        if key.startswith('HWV_') or key in private_keys or key == 'WA_CONTROL_LIVE_GATEWAY_PID':
             env.pop(key)
     private = Path(config['private'])
     # Older pinned binaries still require a duration value.
@@ -481,7 +481,8 @@ def serve(config, *, is_active=None, agent_jobs=False, control_command=None, liv
             for name in ('adapter', 'sidecar'):
                 logs.append((private/f'{name}.log').open('ab', buffering=0))
             env = dict(os.environ)
-            for key in ('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV', '__PYVENV_LAUNCHER__'):
+            for key in ('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV', '__PYVENV_LAUNCHER__',
+                        'WA_CONTROL_LIVE_GATEWAY_PID'):
                 env.pop(key, None)
             command = _adapter_command(config, stage)
             command.extend(['--token-file',str(private/'adapter.token'),'--runs',str(private/'runs')])

@@ -42,7 +42,8 @@ arahan terbaru pemilik, perbarui aturan dan kriteria penerimaannya.
   bot dan menyimpan percakapannya. Setelah instalasi GitHub dan persetujuan
   dependensi asli Hermes, satu wizard menautkan bot dan menawarkan akun
   Control tambahan. Gunakan lifecycle asli Hermes untuk mengelola plugin
-  dan memuat ulang gateway yang sudah berjalan.
+  dan memuat ulang gateway yang sudah berjalan. Pertahankan satu install,
+  satu setup, dan satu profil, tanpa skrip lokal untuk pengguna.
 - Ikuti lifecycle asli Hermes dan pakai API publik jika tersedia. Untuk
   integrasi sesi yang membutuhkan API internal, batasi pemakaiannya pada
   bagian tersebut, dokumentasikan, dan uji pada versi Hermes yang didukung.
@@ -60,7 +61,9 @@ arahan terbaru pemilik, perbarui aturan dan kriteria penerimaannya.
    dan regresi lokal. Penautan dan pengujian di perangkat nyata dilakukan pada
    tahap penerimaan setelah kandidat kode siap. Pakai ulang checkout dan
    dependensi uji yang cocok, lalu bersihkan hasil build dan fixture sementara
-   yang dapat dibuat ulang.
+   yang dapat dibuat ulang. Verifikasi jalur masuk dan balasan DM serta
+   pembukaan sesi audio sebelum menyatakan Control dan Live siap. Catat
+   secara terpisah status pairing, gateway, provider, dan panggilan nyata.
 4. Perbarui PRD dan status setelah setiap perubahan. Catat perilaku yang
    berubah, revisi yang diuji, hasil tes, serta pekerjaan tersisa. Klaim verifikasi
    mengikuti bukti dari pengujian kode, simulasi, atau pemakaian nyata. Untuk

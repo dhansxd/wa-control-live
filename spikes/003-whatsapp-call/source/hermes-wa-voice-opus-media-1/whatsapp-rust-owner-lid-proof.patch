@@ -1,0 +1,27 @@
+diff --git a/src/client/lid_pn.rs b/src/client/lid_pn.rs
+--- a/src/client/lid_pn.rs
++++ b/src/client/lid_pn.rs
+@@ -171,6 +171,23 @@
+         phone_number: &str,
+         source: LearningSource,
+     ) -> Result<()> {
++        // Embedders can re-affirm an exact historical pair with current,
++        // authenticated peer or usync evidence. Hot-path learning retains
++        // its existing skip-on-durable policy and never promotes replays.
++        if matches!(source, LearningSource::PeerLidMessage | LearningSource::Usync) {
++            let guard = self.lid_pn_cache.lock_mutation().await;
++            if let Some(entry) = self.lid_pn_cache.get_entry_by_lid(lid).await
++                && entry.phone_number.as_ref() == phone_number
++                && entry.learning_source == LearningSource::Other
++                && self.lid_pn_cache.get_current_lid(phone_number).await.as_deref() == Some(lid)
++            {
++                let needs_migration = !self.lid_pn_cache.is_persisted(phone_number, lid).await;
++                let confirmed = LidPnEntry { learning_source: source, ..entry };
++                self.lid_pn_cache.add_guarded(&confirmed, &guard).await;
++                drop(guard);
++                return self.persist_and_migrate_lid_pn(confirmed, needs_migration).await;
++            }
++        }
+         match self
+             .record_lid_pn_in_memory(lid, phone_number, source)
+             .await
