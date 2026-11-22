@@ -64,10 +64,13 @@ CALL_PROMPT = (
     'Mulai ulang pekerjaan saat pemilik meminta tindakan itu sekarang. '
     'Jika pemilik akun memilih agar hasil pekerjaan tetap di DM, teruskan pilihan itu ke client. '
     'Minta persetujuan atau penjelasan hanya jika pekerjaan memang membutuhkannya. '
+    'Setelah bertanya, beri pemilik waktu untuk berpikir dan menjawab. Jika ia baru mulai bicara atau '
+    'masih ragu-ragu, dengarkan sampai maksudnya jelas sebelum menanggapi. '
     'Pekerjaan yang masih berjalan tidak membutuhkan konfirmasi dari pemilik. '
     'Kalau ia kemudian minta mendengar hasilnya, ambil hasil pekerjaan yang sama. '
     'Kalau pemilik akun bertanya apa pekerjaan masih berjalan atau sedang sampai mana sekarang, '
-    'gunakan pembaruan alat terverifikasi yang paling baru. Jika datanya belum cukup, tunggu snapshot '
+    'gunakan pembaruan alat terverifikasi yang paling baru. Kalau ia menanyakan angka atau langkah tertentu, '
+    'sebutkan angka atau langkah terakhir yang terverifikasi meskipun masih sama. Jika datanya belum cukup, tunggu snapshot '
     'terkini dari client. Ucapan dalam riwayat bukan bukti keadaan alat saat ini. '
     'Status tugas berjalan belum membuktikan sebuah langkah '
     'seperti render sedang berjalan. Jika langkah gagal, sampaikan kegagalannya meskipun tugas belum selesai. '
@@ -125,6 +128,7 @@ PCM_SILENCE_PEAK = 16  # 16-bit PCM; covers the idle noise floor of the realtime
 # The sidecar primes two 60 ms frames and hands off through an eight-frame channel.
 # Use this estimate only to avoid muting a fresh response after a quiet gap.
 PLAYOUT_MARGIN_SECONDS = 0.6
+CALLER_CONTEXT_QUIET_SECONDS = 0.5
 CHAT_UPDATE_CHUNK_BYTES = 500
 RECENT_TOOL_STEPS = 12
 # Batch progress ticks from a running tool; start, failure and completion stay immediate.
@@ -887,6 +891,10 @@ class LiveCall:
         self.interrupted_output_until = 0.0
         self.last_spoken_exchange = ''
         self.current_spoken_turn = None
+        self.caller_audio_since_turn = False
+        self.last_caller_voice_at = None
+        self.caller_context_timer = None
+        self.unheard_caller_turns = set()
         self.waiting_for_caller = False
         self.muted_reply_turn = None
         self.speakable_handoff_until = 0.0
@@ -903,6 +911,10 @@ class LiveCall:
         self.result_acknowledged = False
         self.output_lock = asyncio.Lock()
         self.context_lock = asyncio.Lock()
+        self.pending_chat_context = deque()
+        self.deferred_work_snapshot = False
+        self.audio_ahead_of_turn = False
+        self.finished_audio_turn = None
         self.switch_lock = asyncio.Lock()
         self.routing, self.connector_for = routing, connector_for
         self.routing_failure = None
@@ -1063,7 +1075,9 @@ class LiveCall:
     async def replace_audio(self, selection=None, *, exclude=(), only=None):
         old = self.audio
         candidate = None
-        self.switch_updates = deque()
+        # Deferred DM chunks can predate this snapshot. Replay only messages the
+        # new provider did not receive in history. Work is seeded from current state.
+        self.switch_updates = deque((refs, text, None) for refs, text, _ in self.pending_chat_context if refs)
         # Events after this snapshot are replayed from switch_updates during handover.
         progress = {key: self.recent_tool_steps(steps.values()) for key, (_, steps) in self.work_progress.items()}
         try:
@@ -1112,6 +1126,9 @@ class LiveCall:
                         self.report.pop('provider_failure', None)
                         self.report.pop('provider_close_reason', None)
                         self.report.pop('error', None)
+                        self.cancel_caller_context_timer()
+                        self.pending_chat_context.clear()  # The snapshot and replay belong to this connection.
+                        self.deferred_work_snapshot = False
                         self.install_audio(candidate)
                         self.seeded_message_refs = seeded_refs
                         self.latest_reply_turn = None
@@ -1168,12 +1185,13 @@ class LiveCall:
             async for result in updates:
                 if result.get('status') == 'reconnecting':
                     self.chat_reconnecting = True
+                    self.discard_deferred_commentary()
                     self.work_progress.clear()
                     self.pending_work_preview = None
                     self.work_preview_cursor = None
                     if not await self.append_chat_context([
                         'Status dan progres pekerjaan sebelumnya kedaluwarsa sampai sesi tersambung kembali.',
-                    ]):
+                    ], latest_work=True):
                         return
                     continue
                 if result.get('status') == 'session_changed':
@@ -1196,7 +1214,7 @@ class LiveCall:
                         if not await self.append_chat_context(context_chunks(
                             update, 'Pembaruan sementara dari pekerjaan yang sedang dibahas (data): ',
                             'Lanjutan pembaruan sementara: ',
-                        )):
+                        ), commentary=(admission_id, generation)):
                             return
                     continue
                 if result.get('status') in {'progress', 'progress_reset'}:
@@ -1207,12 +1225,13 @@ class LiveCall:
                         if self.closed or self.failed.is_set():
                             return
                     else:
+                        self.discard_deferred_commentary()
                         self.work_progress.clear()
                         self.pending_work_preview = None
                         if not await self.append_chat_context([
                             'Progres pekerjaan (data): semua status tool sebelumnya kedaluwarsa. '
                             'Gunakan hanya pembaruan progres setelah pesan ini.',
-                        ]):
+                        ], latest_work=True):
                             return
                     continue
                 if result.get('status') != 'ready' or result.get('session_id') != self.hermes_session_id:
@@ -1239,48 +1258,123 @@ class LiveCall:
             history = ()
         texts = context_chunks(work_updates, 'Status pekerjaan di sesi WhatsApp (data):\n',
                                'Lanjutan status pekerjaan di DM: ')
-        await self.append_chat_context(texts, history=history)
+        await self.append_chat_context(texts, history=history, latest_work=True)
         return cursor
 
-    async def append_chat_context(self, texts, *, history=()):
+    def discard_deferred_commentary(self):
+        self.pending_chat_context = deque(row for row in self.pending_chat_context if row[2] is None)
+
+    def park_chat_context(self):
+        return isinstance(self.connection, CodexConnection) and (
+            self.active_reply_turn is not None or self.audio_ahead_of_turn or self.finished_audio_turn is not None)
+
+    def caller_context_delay(self):
+        if not isinstance(self.connection, CodexConnection) or self.last_caller_voice_at is None:
+            return 0
+        return max(0, self.last_caller_voice_at + CALLER_CONTEXT_QUIET_SECONDS - asyncio.get_running_loop().time())
+
+    def guard_idle_output(self):
+        # A silent append can itself invite speech. Protect legitimate late PCM
+        # and explicitly requested results until their own playout finishes.
+        now = asyncio.get_running_loop().time()
+        playout_finished = (self.latest_reply_turn in self.finished_replies
+                            and 0 < self.playout_expected_until <= now)
+        waiting_for_first_turn = (self.current_spoken_turn is None
+                                  and (self.call_direction != 'outbound' or playout_finished))
+        reply_finished = (self.spoken_turn_final and (self.spoken_reply or self.finished_audio_turn is not None)
+                          and self.spoken_turn_audio_started and playout_finished)
+        if (self.active_reply_turn is None and not self.pending_deliveries and not self.pending_end_call
+                and not (self.result_speech_start_deadline and now < self.result_speech_start_deadline)
+                and now >= self.speakable_handoff_until and (waiting_for_first_turn or reply_finished)):
+            self.waiting_for_caller = True
+
+    async def append_chat_context(self, texts, *, history=(), latest_work=False, commentary=None):
         async with self.context_lock:
-            updates = chain(chat_update_chunks(history), (((), text) for text in texts))
-            for refs, text in updates:
+            updates = chain(((refs, text, False) for refs, text in chat_update_chunks(history)),
+                            (((), text, latest_work) for text in texts))
+            deferred = self.park_chat_context() or self.caller_context_delay() > 0
+            for refs, text, work in updates:
                 if self.switch_updates is not None:
                     self.switch_updates.append((refs, text, None))
                 if refs and self.seeded_message_refs.issuperset(refs):
                     continue
                 if self.routing is not None and self.audio.failed.is_set():
                     continue
-                try:
-                    # A provider can generate unsolicited audio from a context append.
-                    # Keep an idle call quiet until a caller turn or an explicit spoken update.
-                    now = asyncio.get_running_loop().time()
-                    playout_finished = (self.latest_reply_turn in self.finished_replies
-                                        and 0 < self.playout_expected_until <= now)
-                    waiting_for_first_turn = (self.current_spoken_turn is None
-                                              and (self.call_direction != 'outbound' or playout_finished))
-                    reply_finished = (self.spoken_turn_final and self.spoken_reply
-                                      and self.spoken_turn_audio_started and playout_finished)
-                    if (self.active_reply_turn is None and not self.pending_deliveries and not self.pending_end_call
-                            and not (self.result_speech_start_deadline and now < self.result_speech_start_deadline)
-                            and now >= self.speakable_handoff_until and (waiting_for_first_turn or reply_finished)):
-                        self.waiting_for_caller = True
-                    confirmed = await self.connection.append_context(text)
-                except ContextUpdateUnconfirmed as exc:
-                    self.report['chat_updates_status'] = 'ack_timeout'
-                    self.replace_voice = True
-                    self.fail(str(exc))
-                    return False
-                except ConnectionError as exc:
-                    if self.routing is not None and self.audio.failed.is_set():
-                        continue
-                    self.fail(str(exc))
-                    return False
-                self.loaded_context = (self.loaded_context + '\n' + text)[-STARTUP_HISTORY_BYTES:]
-                field = 'chat_updates_sent_unconfirmed' if confirmed is False else 'chat_updates_applied'
-                self.report[field] = self.report.get(field, 0) + 1
+                if deferred and work:
+                    # A long answer may cover many ticks, resets and retries.
+                    # At the boundary derive ONE fresh snapshot from the watcher.
+                    self.deferred_work_snapshot = True
+                else:
+                    self.pending_chat_context.append((refs, text, commentary))
+                if deferred and len(self.pending_chat_context) > STARTUP_HISTORY_BYTES // CHAT_UPDATE_CHUNK_BYTES:
+                    self.pending_chat_context.popleft()
+            return await self.deliver_chat_context()
+
+    async def deliver_chat_context(self):
+        # Called under context_lock. Codex can continue the SAME assistant turn
+        # when it receives commentary after a natural pause. Leave its response
+        # undisturbed while the Hermes watcher continues ingesting changes.
+        while (self.pending_chat_context or self.deferred_work_snapshot) and not self.closed and not self.failed.is_set():
+            if self.park_chat_context():
+                self.guard_idle_output()
+                return True
+            delay = self.caller_context_delay()
+            if delay > 0:
+                if self.current_spoken_turn and self.caller_context_timer is None:
+                    self.caller_context_timer = asyncio.get_running_loop().call_later(
+                        delay, self.on_caller_quiet, self.current_spoken_turn, self.audio)
+                return True
+            if self.deferred_work_snapshot:
+                self.deferred_work_snapshot = False
+                progress = {key: self.recent_tool_steps(steps.values())
+                            for key, (_, steps) in self.work_progress.items()}
+                snapshot = ('Sambungan ke sesi sedang dipulihkan.' if self.chat_reconnecting else
+                            self.replacement_work_context(self.dm_work, progress) or 'Tidak ada pekerjaan aktif.')
+                chunks = context_chunks(snapshot, 'Ganti status dan progres lama dengan snapshot terbaru ini: ',
+                                        'Lanjutan snapshot: ')
+                self.pending_chat_context.extendleft(reversed([((), text, None) for text in chunks]))
+            refs, text, commentary = self.pending_chat_context.popleft()
+            if commentary:
+                admission_id, generation = commentary
+                current_generation, _ = self.work_progress.get(admission_id, (generation, {}))
+                if current_generation > generation or not any(
+                        row['admission_id'] == admission_id and row['status'] == 'started' for row in self.dm_work):
+                    continue
+            if refs and self.seeded_message_refs.issuperset(refs):
+                continue
+            try:
+                self.guard_idle_output()
+                confirmed = await self.connection.append_context(text)
+            except ContextUpdateUnconfirmed as exc:
+                self.report['chat_updates_status'] = 'ack_timeout'
+                self.replace_voice = True
+                self.fail(str(exc))
+                return False
+            except ConnectionError as exc:
+                if self.routing is not None and self.audio.failed.is_set():
+                    continue
+                self.fail(str(exc))
+                return False
+            self.loaded_context = (self.loaded_context + '\n' + text)[-STARTUP_HISTORY_BYTES:]
+            field = 'chat_updates_sent_unconfirmed' if confirmed is False else 'chat_updates_applied'
+            self.report[field] = self.report.get(field, 0) + 1
         return True
+
+    def on_caller_quiet(self, turn_id, audio):
+        self.caller_context_timer = None
+        self.spawn(self.flush_chat_on_caller_turn(turn_id, audio))
+
+    async def flush_chat_on_caller_turn(self, turn_id, audio):
+        # Audio keeps flowing while the local silence timer and provider ACK run.
+        # Recheck after acquiring the lock in case a newer turn or provider owns it.
+        async with self.context_lock:
+            if turn_id == self.current_spoken_turn and self.audio is audio:
+                await self.deliver_chat_context()
+
+    def cancel_caller_context_timer(self):
+        if self.caller_context_timer is not None:
+            self.caller_context_timer.cancel()
+            self.caller_context_timer = None
 
     async def apply_tool_progress(self, update):
         admission_id = update['admission_id']
@@ -1353,7 +1447,7 @@ class LiveCall:
                                  'Jangan mulai bicara. Status ini hanya untuk langkah alat yang disebut.\n',
                            'Lanjutan data progres senyap: ')
             for text in texts
-        ))
+        ), latest_work=True)
 
     async def flush_tool_progress(self):
         while not self.closed and not self.failed.is_set():
@@ -1448,10 +1542,12 @@ class LiveCall:
 
     def interrupt_reply(self):
         if self.active_reply_turn:
+            self.finished_audio_turn = self.active_reply_turn
             self.interrupted_replies.add(self.active_reply_turn)
             self.reply_transcripts.pop(self.active_reply_turn, None)
         self.active_reply_turn = None
         self.assistant_reply_turn = None
+        self.audio_ahead_of_turn = False
         self.result_speech_start_deadline = None
         self.interrupted_output_until = float('inf')
 
@@ -1653,6 +1749,8 @@ class LiveCall:
                 ) + (len(data) / (24_000 * 2))
                 if self.current_spoken_turn and not self.result_acknowledged:
                     # Untagged PCM can arrive before the assistant's turn.created.
+                    if not self.spoken_turn_audio_started and not self.active_reply_turn and not self.assistant_reply_turn:
+                        self.audio_ahead_of_turn = True
                     self.spoken_turn_audio_started = True
             await self.send(audio_envelope(data))
             if audible and self.pending_end_call and self.assistant_reply_turn:
@@ -1676,6 +1774,12 @@ class LiveCall:
         self.mark('first_caller_pcm_received')
         if any(pcm):
             self.mark('first_caller_nonzero_pcm_received')
+            # PCM16 from WhatsApp. A short pause inside the owner's sentence must
+            # not give a commentary append permission to speak over its next words.
+            samples = memoryview(pcm).cast('h')
+            if sum(s * s for s in samples) > len(samples) * 4 ** 2:
+                self.caller_audio_since_turn = True
+                self.last_caller_voice_at = asyncio.get_running_loop().time()
 
     def cancel_end_call(self):
         self.farewell_audio_sent = self.farewell_transcribed = False
@@ -1765,6 +1869,20 @@ class LiveCall:
             user = role == 'user'
             turn_id = turn.get('id')
             identified = isinstance(turn_id, str) and bool(turn_id)
+            if user and identified and not history_only:
+                if turn_id in self.unheard_caller_turns:
+                    return
+                # Codex may invent a new input transcript after a silent context append.
+                # Such a transcript must not unmute the following audio or reach Hermes.
+                if ((self.waiting_for_caller or self.finished_audio_turn is not None
+                     or ((self.pending_chat_context or self.deferred_work_snapshot) and self.park_chat_context()))
+                        and isinstance(self.connection, CodexConnection)
+                        and (self.media_started.is_set() or self.connection.connected.is_set())
+                        and turn_id not in self.user_turns and not self.caller_audio_since_turn):
+                    self.unheard_caller_turns.add(turn_id)
+                    self.guard_idle_output()
+                    self.report['caller_turns_without_audio'] = len(self.unheard_caller_turns)
+                    return
             if not user and identified and turn_id == self.muted_reply_turn and kind == 'turn.done':
                 self.muted_reply_turn = None
                 if self.interrupted_output_until == float('inf'):
@@ -1809,13 +1927,18 @@ class LiveCall:
                     self.user_turn_at_ms[turn_id] = time.time_ns() // 1_000_000
                     self.user_turns[turn_id] = text.strip() if kind == 'turn.created' else ''
                     self.transcripts_done.setdefault(turn_id, asyncio.Event())
+                    self.cancel_caller_context_timer()
                     self.current_spoken_turn = turn_id
+                    self.audio_ahead_of_turn = False
+                    self.finished_audio_turn = None
                     self.spoken_turn_final = False
                     self.assistant_reply_turn = None
                     self.spoken_turn_audio_started = False
                     self.active_reply_turn = None
                     self.result_speech_start_deadline = None
                     self.result_acknowledged = False
+                    if not history_only and (self.pending_chat_context or self.deferred_work_snapshot):
+                        self.spawn(self.flush_chat_on_caller_turn(turn_id, self.audio))
                 elif kind == 'turn.created' or self.transcripts_done[turn_id].is_set():
                     return
                 if kind == 'turn.done':
@@ -1829,6 +1952,7 @@ class LiveCall:
                             self.start_handoff(item, turn_id, released_early=released_early)
                         if turn_id == self.current_spoken_turn:
                             self.spoken_turn_final = True
+                            self.caller_audio_since_turn = False
                             # The caller transcript can finish after the spoken reply.
                             for reply_turn in self.spoken_reply:
                                 self.finish_exchange(reply_turn)
@@ -1858,6 +1982,8 @@ class LiveCall:
                 self.muted_reply_turn = None
                 self.speakable_handoff_until = 0.0
                 self.reply_transcripts[turn_id] = text.strip()
+                self.finished_audio_turn = None
+                self.audio_ahead_of_turn = False
                 preview = self.work_preview_start
                 self.work_preview_start = None
                 # V3 may start a preview after a new caller turn, and provides
@@ -1873,6 +1999,9 @@ class LiveCall:
                     self.assistant_reply_turn = turn_id
                 self.result_speech_start_deadline = None
             elif kind == 'turn.done' and identified:
+                if turn_id == self.active_reply_turn or self.audio_ahead_of_turn:
+                    self.finished_audio_turn = turn_id
+                self.audio_ahead_of_turn = False
                 if turn_id == self.active_reply_turn:
                     self.active_reply_turn = None
                 text = completed_transcript(self.reply_transcripts.get(turn_id, ''), text)
@@ -1923,6 +2052,8 @@ class LiveCall:
             if item.get('target') != 'client':
                 return
             item_id = item.get('id')
+            if isinstance(item.get('user_bidi_turn_id'), str) and item['user_bidi_turn_id'] in self.unheard_caller_turns:
+                return
             if not isinstance(item_id, str) or not item_id:
                 self.fail('Delegation missing correlation ID')
             elif item_id not in self.delegations:
@@ -2341,6 +2472,10 @@ class LiveCall:
                     )
             return
         not_offered = admission_id not in self.offered_work_results
+        if not repeat:
+            text = ('Saat menyampaikan hasil, cukup sebut fakta, hasil, atau kebutuhan yang baru '
+                    'bagi pemilik. Jika kamu sudah mengajukan pertanyaan yang sama di telepon, '
+                    'tunggu jawabannya.\n' + text)
         now = asyncio.get_running_loop().time()
         preview_pending = self.work_preview_start is not None and self.work_preview_start[1] > now
         if (item_id is not None and turn_id == self.current_spoken_turn
@@ -2353,11 +2488,10 @@ class LiveCall:
             finally:
                 self.finish_work_speech(admission_id, accepted)
         elif self.connection.can_speak and (not_offered or (repeat and turn_id == self.current_spoken_turn)):
-            if item_id is not None:
-                # A quiet context update must not hold up the queued live announcement.
-                self.spawn(self.append_handoff(item_id, text, channel='commentary'))
+            # The proposal was released before observation. Sending the final to the
+            # open reply as commentary can voice it before this queued speech request.
             await self.announce_work_result(admission_id, text, repeat_turn=turn_id if repeat else None)
-        elif item_id is not None:
+        elif item_id is not None and (not_offered or (repeat and turn_id == self.current_spoken_turn)):
             await self.append_handoff(item_id, text, channel='commentary')
 
     def finish_work_speech(self, admission_id, accepted):
@@ -2421,7 +2555,10 @@ class LiveCall:
         # transcript mirror until a definite pre-admission rejection is known.
         self.native_task_turns.add(turn_id)
         submit = self.submit_task(item_id, turn_id, request, attachment_admission_id=attachment_admission_id)
-        launch_requested = (turn_id == self.current_spoken_turn
+        # Codex can begin its direct reply after the early transcript acknowledgment,
+        # before either its PCM or its turn.created event reaches the adapter.
+        reply_released = released_early and isinstance(self.connection, CodexConnection)
+        launch_requested = (not reply_released and turn_id == self.current_spoken_turn
                             and not (self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started))
         if launch_requested or not released_early:
             result, acknowledged = await asyncio.gather(
@@ -2444,13 +2581,16 @@ class LiveCall:
             return
         if acknowledged:
             current = turn_id == self.current_spoken_turn
-            provisional = status in {'pending', 'queued', 'started', 'unknown'}
+            provisional = admission_id is not None and status in {'pending', 'queued', 'started', 'unknown'}
             already_replied = self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started
-            audible = current and (not provisional or not (launch_requested or already_replied))
-            acknowledged = await self.append_handoff(
-                item_id, text, channel='speakable' if audible else 'commentary',
-                audio_turn=turn_id if audible else None,
-            )
+            audible = current and (not provisional or not (reply_released or launch_requested or already_replied))
+            # The session watcher already supplies admission status. Sending the same receipt
+            # to an acknowledged Codex delegation can restart speech within its existing turn.
+            if audible or not provisional or not isinstance(self.connection, CodexConnection):
+                acknowledged = await self.append_handoff(
+                    item_id, text, channel='speakable' if audible else 'commentary',
+                    audio_turn=turn_id if audible else None,
+                )
         if (status in WORK_OPEN_STATUSES | {'unknown'} and admission_id
                 and admission_id not in self.work_followers):
             self.watch_dm_work(admission_id, item_id if acknowledged else None, turn_id, pending_reported=True)
@@ -2626,6 +2766,7 @@ class LiveCall:
         if self.closed:
             return
         self.closed = True
+        self.cancel_caller_context_timer()
         closing_audio = self.audio if self.audio is not None and not self.audio.retired else None
         if closing_audio is not None:
             closing_audio.retire()

@@ -108,6 +108,236 @@ def test_idle_context_does_not_speak_before_next_caller_turn(tmp_path, monkeypat
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize('boundary', ['caller', 'idle', 'close'])
+def test_silent_updates_wait_for_codex_to_finish_its_existing_turn(tmp_path, monkeypatch, boundary):
+    async def exercise():
+        voice, remote, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        delivered = []
+
+        async def turn(kind, role, turn_id, text=''):
+            await voice.on_data({'type': kind, 'turn': {'id': turn_id, 'role': role, 'transcript': text}})
+
+        async def append(text):
+            delivered.append(text)
+            if voice.active_reply_turn == 'first-answer':
+                # Codex may continue the SAME turn on commentary following a pause.
+                await feed_output(voice, remote, 2300)
+                await voice.on_data({'type': 'turn.delta', 'turn_id': 'first-answer', 'delta': 'Jawaban ulang.'})
+
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        try:
+            await turn('turn.done', 'user', 'owner', 'Buatkan gambar.')
+            await turn('turn.created', 'assistant', 'first-answer')
+            await feed_output(voice, remote, 1500)
+            sent.clear()
+            for text in ['Mulai mengerjakan gambar.', 'Ekspor gagal.']:
+                assert await voice.append_chat_context([text])
+            await asyncio.sleep(0)
+            assert not delivered and not audio_messages(sent)
+            if boundary == 'close':
+                await voice.close()
+                assert not delivered
+                return
+            if boundary == 'idle':
+                await turn('turn.done', 'assistant', 'first-answer', 'Sedang kubuat.')
+                voice.playout_expected_until = asyncio.get_running_loop().time() - 1
+                await asyncio.sleep(0)
+                assert not delivered
+            await turn('turn.created', 'user', 'owner-again', 'Sudah sampai mana?')
+            await wait_until(lambda: len(delivered) == 2)
+            assert delivered == ['Mulai mengerjakan gambar.', 'Ekspor gagal.']
+            assert not audio_messages(sent)
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
+
+
+def test_codex_parks_updates_after_final_transcript_before_first_or_last_pcm(tmp_path, monkeypatch):
+    async def exercise():
+        voice, remote, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        delivered = []
+
+        async def append(text):
+            delivered.append(text)
+
+        async def turn(kind, role, turn_id, text=''):
+            await voice.on_data({'type': kind, 'turn': {'id': turn_id, 'role': role, 'transcript': text}})
+
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        try:
+            voice.feed(struct.pack('<h', 260) * 320)
+            await turn('turn.done', 'user', 'first', 'Buatkan gambar.')
+            await turn('turn.created', 'assistant', 'first-answer')
+            await turn('turn.done', 'assistant', 'first-answer', 'Aku buatkan.')
+            await voice.append_chat_context(['Ekspor mulai.'])
+            await turn('turn.created', 'user', 'fabricated', 'Kata yang tidak diucapkan.')
+            assert 'fabricated' not in voice.user_turns and not delivered
+            await feed_output(voice, remote, 1600)
+            await voice.append_chat_context(['Ekspor selesai.'])
+            await feed_output(voice, remote, 1300)
+            assert len(audio_messages(sent)) == 2
+            voice.playout_expected_until = asyncio.get_running_loop().time() - 1
+            await asyncio.sleep(0)
+            assert not delivered
+            voice.feed(struct.pack('<h', 300) * 320)
+            await turn('turn.created', 'user', 'actual-question', 'Sudah selesai?')
+            await wait_until(lambda: len(delivered) == 2)
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('boundary', ['quiet', 'answer', 'replacement_turn', 'close'])
+def test_codex_context_waits_for_actual_caller_audio_to_pause(tmp_path, monkeypatch, boundary):
+    async def exercise():
+        voice, _, _, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        monkeypatch.setattr(loop, 'time', lambda: clock[0])
+        speech = struct.pack('<h', 320) * 320
+        silence = bytes(len(speech))
+        forwarded, delivered = [], []
+        monkeypatch.setattr(voice.connection, 'feed', forwarded.append)
+
+        async def append(text):
+            delivered.append((voice.current_spoken_turn, text, clock[0]))
+
+        async def turn(kind, role, turn_id, text=''):
+            await voice.on_data({'type': kind, 'turn': {'id': turn_id, 'role': role, 'transcript': text}})
+
+        async def advance(seconds):
+            clock[0] += seconds
+            # Advance due call_later callbacks and their separate flush coroutine.
+            for _ in range(4):
+                await asyncio.sleep(0)
+
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        try:
+            voice.feed(speech)
+            await turn('turn.done', 'user', 'first', 'Mulai ekspor.')
+            await turn('turn.created', 'assistant', 'a1')
+            await turn('turn.done', 'assistant', 'a1', 'Aku kerjakan.')
+            await voice.append_chat_context(['Ekspor mencapai 37 persen.'])
+
+            voice.feed(speech)
+            await turn('turn.created', 'user', 'six-second-question')
+            for frame in range(300):
+                # 20 ms per frame; a real 280 ms pause halfway through.
+                voice.feed(silence if 130 <= frame < 144 else speech)
+                await advance(0.02)
+                assert not delivered
+            end_of_speech = clock[0] - 0.02
+            await turn('turn.done', 'user', 'six-second-question', 'Sudah sampai mana?')
+            assert len(forwarded) == 302
+            assert voice.caller_context_timer is not None
+            await advance(0.43)
+            assert not delivered
+            if boundary == 'close':
+                await voice.close()
+                await advance(0.2)
+                assert voice.caller_context_timer is None and not delivered
+                return
+            if boundary in ('answer', 'replacement_turn'):
+                await turn('turn.created', 'assistant', 'real-reply')
+                if boundary == 'answer':
+                    await advance(0.2)
+                    assert not delivered  # Never write a passive update into this response.
+                    return
+                voice.feed(speech)
+                end_of_speech = clock[0]
+                await turn('turn.created', 'user', 'interruption', 'Tunggu.')
+                await advance(0.15)
+                assert not delivered
+                await advance(0.36)
+            else:
+                await advance(0.06)
+            expected = 'interruption' if boundary == 'replacement_turn' else 'six-second-question'
+            assert [(turn_id, text) for turn_id, text, _ in delivered] == [(expected, 'Ekspor mencapai 37 persen.')]
+            assert delivered[0][2] - end_of_speech >= adapter.CALLER_CONTEXT_QUIET_SECONDS
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+def test_codex_defers_context_after_untagged_audio_and_drops_old_progress_and_commentary(tmp_path, monkeypatch):
+    async def exercise():
+        voice, remote, _, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        delivered = []
+
+        async def append(text):
+            delivered.append(text)
+
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        try:
+            await voice.on_data({'type': 'turn.done', 'turn': {
+                'role': 'user', 'id': 'owner', 'transcript': 'Pakai lampiran tadi.'}})
+            await feed_output(voice, remote, 1510)  # PCM arrived before the turn ID.
+            work = {'session_id': ACTIVE_WHATSAPP_SESSION, 'admission_id': DM_ADMISSION_ID,
+                    'status': 'started', 'text': 'Coba ekspor.'}
+            voice.update_dm_work([work])
+            voice.work_progress[DM_ADMISSION_ID] = (1, {'tool-1': {'tool': 'render', 'percent': 15, 'status': 'started'}})
+            for tick in range(100):
+                assert await voice.append_chat_context([f'Pengukuran lama {tick}'], latest_work=True)
+            assert await voice.append_chat_context(['Komentar lama.'], commentary=(DM_ADMISSION_ID, 1))
+            assert not delivered and len(voice.pending_chat_context) == 1
+            await voice.on_data({'type': 'turn.created', 'turn': {'role': 'assistant', 'id': 'reply'}})
+            voice.work_progress[DM_ADMISSION_ID] = (2, {'tool-2': {'tool': 'export', 'percent': 57, 'status': 'started'}})
+            await voice.on_data({'type': 'turn.created', 'turn': {'role': 'user', 'id': 'next'}})
+            await wait_until(lambda: not voice.pending_chat_context and not voice.deferred_work_snapshot)
+            assert '"percent": 57' in ' '.join(delivered)
+            assert all('lama' not in text.lower().split(': ', 1)[-1] for text in delivered)
+            assert not any('"percent": 15' in text for text in delivered)
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
+
+
+def test_codex_silent_context_with_invented_caller_cannot_reopen_audio(tmp_path, monkeypatch):
+    async def exercise():
+        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        async def turn(kind, role, turn_id, text=''):
+            await voice.on_data({'type': kind, 'turn': {'role': role, 'id': turn_id, 'transcript': text}})
+
+        async def append(_text):
+            return True
+
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        try:
+            voice.feed(struct.pack('<h', 250) * 320)
+            await turn('turn.done', 'user', 'first', 'Buat satu poster.')
+            await turn('turn.created', 'assistant', 'answer')
+            await feed_output(voice, remote, 1000)
+            await turn('turn.done', 'assistant', 'answer', 'Aku buat posternya.')
+            voice.playout_expected_until = asyncio.get_running_loop().time() - 1
+            await voice.append_chat_context(['Progres poster sudah 37 persen.'])
+            assert voice.waiting_for_caller
+            sent.clear()
+            voice.feed(struct.pack('<h', 1) * 320)
+            await turn('turn.created', 'user', 'invented', 'Terdengar kata.')
+            await turn('turn.done', 'user', 'invented', 'Terdengar kata.')
+            await voice.on_data(delegation(['Ulangi tugas'], turn_id='invented'))
+            await turn('turn.created', 'assistant', 'unsolicited')
+            await feed_output(voice, remote, 1900)
+            await turn('turn.done', 'assistant', 'unsolicited', 'Progres poster 37 persen.')
+            assert not sent and not appended
+            assert 'invented' not in voice.user_turns
+            assert voice.report['caller_turns_without_audio'] == 1
+
+            # Actual quiet speech opens the next turn and its answer as usual.
+            voice.feed(struct.pack('<h', 20) * 320)
+            await turn('turn.created', 'user', 'real', 'Sampai mana?')
+            await turn('turn.done', 'user', 'real', 'Sampai mana?')
+            await turn('turn.created', 'assistant', 'asked')
+            await feed_output(voice, remote, 1600)
+            await turn('turn.done', 'assistant', 'asked', 'Sudah 37 persen.')
+            assert len(audio_messages(sent)) == 1
+            assert voice.user_turns['real'] == 'Sampai mana?'
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
+
+
 async def acknowledge(voice, item_id):
     await voice.on_data({'type':'delegation.context.appended', 'delegation_item_id':item_id})
 
@@ -368,26 +598,22 @@ def test_confirmed_task_requires_final_transcript_and_returns_real_result(tmp_pa
             submission_id = uuid.uuid5(uuid.NAMESPACE_URL, f'wa-control-live:{tmp_path.name}:caller-1').hex
             assert routed == [''.join(request_parts)]
             assert submitted == [(submission_id, ''.join(request_parts), ACTIVE_WHATSAPP_SESSION)]
-            await wait_until(lambda: len(appended) == 2)
-            assert appended[1]['delegation_item_id'] == 'request-1'
-            assert appended[1]['channel'] == 'speakable'
-            await acknowledge(voice, 'request-1')
+            assert len(appended) == 1
             assert not audio_messages(sent)
             await feed_output(voice, remote, 1500)
             assert audio_messages(sent) == [adapter.audio_envelope(struct.pack('<480h', *([1500] * 480)))]
-            assert len(appended) == 2
             await wait_until(lambda: voice.playout_expected_until <= asyncio.get_running_loop().time())
             release.set()
-            await wait_until(lambda: len(appended) == 3)
-            assert appended[2]['type'] == 'delegation.context.append'
-            assert appended[2]['delegation_item_id'] == 'request-1'
-            assert appended[2]['content'][0]['text'].endswith('Hasil asli Hermes.')
+            await wait_until(lambda: len(appended) == 2)
+            assert appended[1]['type'] == 'delegation.context.append'
+            assert appended[1]['delegation_item_id'] == 'request-1'
+            assert appended[1]['content'][0]['text'].endswith('Hasil asli Hermes.')
             assert voice.report['agent_receipts'] == {'request-1': {'admission_id': 'native-admission'}}
             await acknowledge(voice, 'different-request')
-            assert voice.report['acknowledged_delegations'] == ['request-1'] * 2
+            assert voice.report['acknowledged_delegations'] == ['request-1']
             assert voice.pending_deliveries
             await acknowledge(voice, 'request-1')
-            assert voice.report['acknowledged_delegations'] == ['request-1'] * 3
+            assert voice.report['acknowledged_delegations'] == ['request-1'] * 2
             await feed_output(voice, remote, 2000)
             await wait_until(lambda: voice.report['result_audio_forwarded_bytes'] == 960)
         finally:
@@ -395,7 +621,7 @@ def test_confirmed_task_requires_final_transcript_and_returns_real_result(tmp_pa
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize('new_speaker', ['assistant', 'caller', 'same_turn_assistant', 'same_turn_audio_first'])
+@pytest.mark.parametrize('new_speaker', ['assistant', 'caller', 'same_turn_assistant', 'same_turn_audio_first', 'hesitation'])
 @pytest.mark.parametrize('speech_confirmed', [True, False])
 def test_previous_task_speaks_once_after_the_current_exchange(tmp_path, monkeypatch, new_speaker, speech_confirmed):
     monkeypatch.setattr(adapter, 'PLAYOUT_MARGIN_SECONDS', 0.1)
@@ -404,6 +630,8 @@ def test_previous_task_speaks_once_after_the_current_exchange(tmp_path, monkeypa
         entered, release = asyncio.Event(), asyncio.Event()
         speech_accepted = asyncio.Event()
         submitted, speech_requests, saved = [], [], []
+        final = ('Mau catatannya dikirim ke mana? Dokumen sudah tersimpan.'
+                 if new_speaker == 'hesitation' else 'Catatan sudah selesai.')
 
         class Jobs:
             async def route(self, *_args, session_id):
@@ -413,7 +641,7 @@ def test_previous_task_speaks_once_after_the_current_exchange(tmp_path, monkeypa
                 submitted.append((text, session_id))
                 entered.set()
                 await release.wait()
-                return {'status': 'completed', 'output': 'Catatan sudah selesai.',
+                return {'status': 'completed', 'output': final,
                         'receipt': {'session_id': session_id, 'admission_id': DM_ADMISSION_ID}}
 
             async def save_exchange(self, session_id, exchange, *, wait_for_lease=False):
@@ -445,7 +673,12 @@ def test_previous_task_speaks_once_after_the_current_exchange(tmp_path, monkeypa
             await acknowledge(voice, 'request-1')
             await asyncio.wait_for(entered.wait(), 1)
 
-            question = 'Kamu masih dengar aku?'
+            question = 'Em' if new_speaker == 'hesitation' else 'Kamu masih dengar aku?'
+            if new_speaker == 'hesitation':
+                await turn('turn.created', 'assistant', 'original-clarification')
+                await feed_output(voice, remote, 2200)
+                await turn('turn.done', 'assistant', 'original-clarification', 'Mau catatannya dikirim ke mana?')
+                sent.clear()
             same_turn = new_speaker in {'same_turn_assistant', 'same_turn_audio_first'}
             audio_first = new_speaker == 'same_turn_audio_first'
             if not same_turn:
@@ -457,12 +690,10 @@ def test_previous_task_speaks_once_after_the_current_exchange(tmp_path, monkeypa
             if audio_first:
                 await feed_output(voice, remote, 2500)
             release.set()
-            await wait_until(lambda: len(appended) == 2)
-            assert appended[-1]['delegation_item_id'] == 'request-1'
-            assert appended[-1]['channel'] == 'commentary'
-            await asyncio.sleep(0)
+            await wait_until(lambda: bool(voice.report['backend_completed_delegations']))
+            assert len(appended) == 1
             assert speech_requests == []
-            if new_speaker == 'caller':
+            if new_speaker in {'caller', 'hesitation'}:
                 await turn('turn.done', 'user', 'caller-2', question)
                 await turn('turn.created', 'assistant', 'answer-2')
             if audio_first:
@@ -477,22 +708,23 @@ def test_previous_task_speaks_once_after_the_current_exchange(tmp_path, monkeypa
             assert not voice.work_speech_ready()
 
             await wait_until(lambda: bool(speech_requests))
-            assert 'Catatan sudah selesai.' in speech_requests[0]
-            # Speech can start after the current exchange even while the
-            # quiet update for the previous exchange awaits acknowledgment.
-            assert 'request-1' in voice.pending_deliveries
+            assert final in speech_requests[0]
+            assert 'Jika kamu sudah mengajukan pertanyaan yang sama' in speech_requests[0]
+            # Codex can speak even a commentary append inside a still-open reply.
+            # Its single queued speech request is the only copy of the result.
+            assert 'request-1' not in voice.pending_deliveries
+            assert len(appended) == 1
             caller = voice.current_spoken_turn
             follow = voice.spawn(voice.present_work_result(
-                'concurrent-follow', caller, DM_ADMISSION_ID, 'Catatan sudah selesai.',
+                'concurrent-follow', caller, DM_ADMISSION_ID, final,
             ))
             await asyncio.sleep(0)
-            assert len(appended) == 2
+            assert len(appended) == 1
             assert not follow.done()
             speech_accepted.set()
-            await acknowledge(voice, 'request-1')
             if speech_confirmed:
                 await asyncio.wait_for(follow, 1)
-                assert len(appended) == 2 and DM_ADMISSION_ID in voice.offered_work_results
+                assert len(appended) == 1 and DM_ADMISSION_ID in voice.offered_work_results
                 await turn('turn.created', 'assistant', 'late-result')
                 await feed_output(voice, remote, 3000)
                 await turn('turn.done', 'assistant', 'late-result', 'Catatan sudah selesai.')
@@ -501,7 +733,7 @@ def test_previous_task_speaks_once_after_the_current_exchange(tmp_path, monkeypa
                     adapter.audio_envelope(frame) for frame in (conversation_pcm, result_pcm)
                 ]
             else:
-                await wait_until(lambda: len(appended) == 3)
+                await wait_until(lambda: len(appended) == 2)
                 assert appended[-1]['delegation_item_id'] == 'concurrent-follow'
                 assert 'Belum bisa dipastikan' in appended[-1]['content'][0]['text']
                 await acknowledge(voice, 'concurrent-follow')
@@ -592,9 +824,7 @@ def test_unlinked_or_backing_proposal_and_second_item_cannot_repeat_a_task(tmp_p
             assert (appended[3]['delegation_item_id'], appended[3]['channel']) == ('first', 'speakable')
             assert submitted == ['Kerjakan satu kali']
             await acknowledge(voice, 'first')
-            await wait_until(lambda: len(appended) == 5)
-            assert (appended[4]['delegation_item_id'], appended[4]['channel']) == ('first', 'commentary')
-            await acknowledge(voice, 'first')
+            assert 'belum bisa memastikan' in appended[3]['content'][0]['text']
         finally:
             await voice.close()
     asyncio.run(exercise())
@@ -895,12 +1125,17 @@ def test_live_silently_receives_latest_tool_progress_while_caller_keeps_talking(
                        'finding': 'Pembuatan audio gagal.'}
             for update in ({**event, 'seq': 26, 'percent': 26}, failure, failure):
                 updates.put_nowait(update)
+            # The watcher keeps receiving real evidence while Codex holds its
+            # assistant turn open. Injecting it now would trigger a second answer.
+            await wait_until(lambda: 'check-page' in voice.work_progress[DM_ADMISSION_ID][1])
+            assert not any('Pembuatan audio gagal.' in text for text in appended)
+            await voice.on_data({'type': 'turn.created', 'turn': {
+                'role': 'user', 'id': 'status-question', 'transcript': 'Sudah sampai mana?'
+            }})
             await wait_until(lambda: 'Pembuatan audio gagal.' in voice.loaded_context)
-            await wait_until(lambda: not voice.tool_progress_ready.is_set())
-            assert sum('Pembuatan audio gagal.' in text for text in appended) == 1
-            failure_index = next(i for i, text in enumerate(appended) if 'Pembuatan audio gagal.' in text)
-            assert any('"percent": 26' in text for text in appended[:failure_index])
-            assert all('"percent": 26' not in text for text in appended[failure_index + 1:])
+            fresh = ' '.join(appended[2:])
+            assert fresh.count('Pembuatan audio gagal.') == 1
+            assert fresh.index('"percent": 26') < fresh.index('Pembuatan audio gagal.')
             assert voice.dm_work == [work] and not voice.delegations
         finally:
             await voice.close()
@@ -1113,7 +1348,11 @@ def test_live_dm_work_is_offered_to_voice_before_the_same_result_completes(
             if completed_while_busy:
                 voice.active_reply_turn = 'other-reply'
             voice.spawn(voice.follow_chat(0))
-            await wait_until(lambda: draft in voice.loaded_context)
+            if completed_while_busy:
+                await wait_until(lambda: voice.work_preview_cursor is not None)
+                assert draft not in voice.loaded_context
+            else:
+                await wait_until(lambda: draft in voice.loaded_context)
             if tracked and not completed_while_busy:
                 await wait_until(lambda: len(speech) == 1)
                 assert draft in speech[0] and 'pembaruan sementara' in speech[0]
@@ -1209,8 +1448,8 @@ def test_explicit_result_repeat_waits_for_preview_from_another_job(tmp_path, mon
             repeat = voice.spawn(voice.present_work_result(
                 'repeat-1', 'caller-2', DM_ADMISSION_ID, 'Hasil yang ingin diulang.', repeat=True,
             ))
-            await wait_until(lambda: len(appended) == 1)
-            assert appended[0]['channel'] == 'commentary'
+            await asyncio.sleep(0)
+            assert not appended
             assert speech == ['Progres pekerjaan lain.']
             await voice.on_data({'type': 'turn.created', 'turn': {'id': 'preview', 'role': 'assistant'}})
             await voice.on_data({'type': 'turn.done', 'turn': {'id': 'preview', 'role': 'assistant'}})
@@ -1393,21 +1632,18 @@ def test_pending_voice_task_is_observed_and_result_is_offered_once(
             assert appended[0]['channel'] == ('commentary' if prior_reply else 'speakable')
             assert 'sedang diproses' not in appended[0]['content'][0]['text']
             await acknowledge(voice, 'request-1')
-            await wait_until(lambda: len(appended) == 2)
-            expected_status = {
-                'queued': 'menunggu giliran',
-                'pending': 'Status terbaru belum tersedia',
-                'unknown': 'belum bisa memastikan',
-                'approval_required': 'menunggu persetujuan',
-            }[submit_status]
-            assert expected_status in appended[1]['content'][0]['text']
-            assert appended[1]['channel'] == ('speakable' if submit_status == 'approval_required' else 'commentary')
-            await acknowledge(voice, 'request-1')
+            expected_messages = 1
+            if submit_status == 'approval_required':
+                await wait_until(lambda: len(appended) == 2)
+                assert 'menunggu persetujuan' in appended[1]['content'][0]['text']
+                assert appended[1]['channel'] == 'speakable'
+                await acknowledge(voice, 'request-1')
+                expected_messages += 1
 
             await wait_until(lambda: len(observed) == 1)
             voice.update_dm_work([{**receipt, 'status': 'completed', 'text': request}])
             await asyncio.wait_for(observing.wait(), 1)
-            assert len(appended) == 2
+            assert len(appended) == expected_messages
             await feed_output(voice, remote, 1700)
             spoken_samples = (1500, 1700) if prior_reply == 'pcm' else (1700,)
             assert audio_messages(sent) == [
@@ -1417,12 +1653,53 @@ def test_pending_voice_task_is_observed_and_result_is_offered_once(
 
             await voice.on_data(event)
             complete.set()
-            await wait_until(lambda: len(appended) == 3)
+            await wait_until(lambda: len(appended) == expected_messages + 1)
             await acknowledge(voice, 'request-1')
             assert [(msg['delegation_item_id'], msg['channel']) for msg in appended
                     if output in msg['content'][0]['text']] == [('request-1', 'speakable')]
             assert submitted == [(request, ACTIVE_WHATSAPP_SESSION)]
             assert observed == [(ACTIVE_WHATSAPP_SESSION, DM_ADMISSION_ID)] * 2
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('reply_started', [True, False])
+def test_codex_early_release_does_not_reprompt_for_native_admission(tmp_path, monkeypatch, reply_started):
+    async def exercise():
+        route_started, route_ready = asyncio.Event(), asyncio.Event()
+        request = 'Buat satu ilustrasi.'
+
+        class Jobs(TranscriptJobs):
+            async def route(self, *_args, session_id):
+                route_started.set()
+                await route_ready.wait()
+                return {'status': 'task'}
+
+            async def submit(self, _submission_id, text, *, session_id, **_):
+                assert text == request
+                return {'status': 'started', 'receipt': {'session_id': session_id, 'admission_id': DM_ADMISSION_ID}}
+
+            async def observe_work(self, session_id, admission_id):
+                return {'status': 'started', 'session_id': session_id, 'admission_id': admission_id}
+
+        voice, _, _, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        try:
+            await voice.on_data({'type': 'turn.created', 'turn': {'role': 'user', 'id': 'caller-1'}})
+            await voice.on_data(delegation([request]))
+            await wait_until(lambda: len(appended) == 1)
+            await acknowledge(voice, 'request-1')
+            await voice.on_data({'type': 'turn.done', 'turn': {'role': 'user', 'id': 'caller-1',
+                                                               'transcript': request}})
+            await asyncio.wait_for(route_started.wait(), 1)
+            if reply_started:
+                await voice.on_data({'type': 'turn.created', 'turn': {'role': 'assistant', 'id': 'reply'}})
+            route_ready.set()
+            await wait_until(lambda: DM_ADMISSION_ID in voice.work_followers or len(appended) > 1)
+            assert len(appended) == 1
+            assert appended[0]['channel'] == 'commentary'
+            assert DM_ADMISSION_ID in voice.work_followers
         finally:
             await voice.close()
 
@@ -1562,10 +1839,8 @@ def test_voice_acknowledges_work_and_keeps_talking_before_the_native_receipt(tmp
 
             await voice.on_data(launch)
             release_submission.set()
-            await wait_until(lambda: len(appended) == 3)
-            assert (appended[2]['delegation_item_id'], appended[2]['channel']) == ('request-1', 'commentary')
-            assert 'menunggu giliran' in appended[2]['content'][0]['text']
-            await acknowledge(voice, 'request-1')
+            await wait_until(lambda: DM_ADMISSION_ID in voice.work_followers)
+            assert len(appended) == 2
             assert voice.call_work == {DM_ADMISSION_ID}
             assert routes == [request, question]
             assert submissions == [(request, ACTIVE_WHATSAPP_SESSION)]
@@ -2110,7 +2385,7 @@ def test_next_turn_does_not_save_exchange_before_pending_route_finishes(
             release.set()
             await wait_until(lambda: len(appended) == 1)
             await acknowledge(voice, 'request-1')
-            if route_status == 'task':
+            if route_status == 'task' and submit_status != 'queued':
                 await wait_until(lambda: len(appended) == 2)
                 await acknowledge(voice, 'request-1')
             assert await asyncio.wait_for(flush, 1) == 'saved'

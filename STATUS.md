@@ -189,6 +189,29 @@ Regresi kandidat pada Hermes v0.23.2 lulus 786 tes Python, 17 subtes, dan
 7 tes Baileys. Panggilan balik yang berdering dan penutupan dari sisi Hermes
 masih perlu dikonfirmasi pada ponsel.
 
+Pada panggilan perangkat dengan revisi `b815440`, satu permintaan pemilik
+menghasilkan satu tugas. Sesudah pertanyaan klarifikasi pertama selesai terdengar,
+Codex menambahkan ucapan lagi dalam giliran suara yang sama ketika status tugas
+masuk. Transkrip final provider baru tiba sesudah ucapan tambahan tersebut.
+Kandidat berikutnya menahan pengiriman konteks rutin selama Codex berbicara.
+Pekerjaan Hermes dan penerimaan progres tetap berjalan. Pembaruan rutin yang
+tiba ketika Codex menjawab atau menunggu tanggapan tersimpan di adapter.
+Pengiriman otomatis memperhitungkan audio pemilik pada giliran berikutnya. Pemberitahuan
+penerimaan tugas memakai tanggapan yang sudah dibuka untuk giliran itu.
+Uji dengan masukan sintetis juga menangkap transkrip pemilik yang dibuat
+provider ketika tidak ada audio baru dari pemanggil. Sesudah pembaruan senyap,
+transkrip seperti itu tidak membuka keluaran suara atau memulai tugas. Audio
+baru dari pemilik tetap membuka giliran berikutnya.
+
+Dalam probe WebRTC berulang memakai audio dan pekerjaan sintetis, versi lama
+menyuarakan status antrean setelah jawaban pertama. Pada kandidat ini, keluaran
+audio ke penerima simulasi tetap hening sampai pertanyaan berikutnya selesai.
+Codex lalu menjawab 37 persen dari progres yang diteruskan otomatis, dengan
+satu tugas dan tanpa pencarian ulang. Dalam satu percobaan terpisah, provider
+tidak menyelesaikan transkrip pertama setelah pengakuan delegasi. Percobaan itu
+belum mencapai skenario jawaban ganda. Regresi lokal lulus 800 tes Python,
+17 subtes, dan 7 tes Baileys. Uji ulang versi perbaikan pada ponsel tetap terbuka.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak

@@ -185,7 +185,7 @@ def test_application_failure_reaches_live_before_final_task_receipt_and_is_only_
         voice = voice_fixture(tmp_path, monkeypatch, SimpleNamespace())
         context, previews = [], []
 
-        async def append_chat(items):
+        async def append_chat(items, *, latest_work=False):
             context.extend(items)
             return True
 
@@ -274,22 +274,16 @@ def test_delegated_request_keeps_all_instructions_without_replaying(tmp_path, sp
             await asyncio.wait_for(result_sent.wait(), 2)
             assert submitted == [spoken_request]
             assert routed == [(fragment, spoken_request)]
-            progress, launch = returned
+            progress, result = returned
             assert progress['delegation_item_id'] == 'fixture-delegation'
             assert progress['channel'] == 'commentary'
-            assert launch['delegation_item_id'] == 'fixture-delegation'
-            assert launch['channel'] == 'speakable'
-            result_sent.clear()
-            await voice.on_data({'type':'delegation.context.appended',
-                                 'delegation_item_id':'fixture-delegation'})
-            await asyncio.wait_for(result_sent.wait(), 2)
-            result = returned[2]
             assert result['delegation_item_id'] == 'fixture-delegation'
+            assert result['channel'] == 'speakable'
             assert result['content'][0]['text'].endswith('Berhasil, daftar judul sudah ditambahkan.')
             await voice.on_data({'type':'delegation.context.appended',
                                  'delegation_item_id':'fixture-delegation'})
             await asyncio.gather(*voice.tasks)
-            assert voice.report['acknowledged_delegations'] == ['fixture-delegation'] * 3
+            assert voice.report['acknowledged_delegations'] == ['fixture-delegation'] * 2
         finally:
             await voice.close()
     asyncio.run(exercise())
