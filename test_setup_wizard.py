@@ -115,7 +115,7 @@ def test_bare_setup_dispatches_to_wizard(wizard, monkeypatch):
 def test_fresh_setup_uses_bundled_runtime_with_optional_live_deferred(wizard, monkeypatch):
     monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (None, {}))
 
-    _setup(wizard, [f"+{BOT}", f"+{OWNER}", "personal", ""])
+    _setup(wizard, [f"+{BOT}", f"+{OWNER}", "", ""])
 
     assert wizard.installs == []
     assert wizard.links == [BOT]
@@ -150,7 +150,7 @@ def test_wrong_pairing_keeps_setup_unpublished_then_retry_saves_live_secret(wiza
     monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (live, {SECRET_NAME: SECRET}))
     wizard.scanned[0] = OTHER
     with pytest.raises(RuntimeError, match="mismatched"):
-        _setup(wizard, [BOT, OWNER, "", ""])
+        _setup(wizard, [BOT, OWNER, ""])
 
     assert not wizard.settings.get("unified_gateway")
     assert "live" not in wizard.settings
@@ -179,7 +179,7 @@ def test_stock_setup_uses_detected_bot_and_confirms_owner_with_prebuilt_sidecar(
     monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (None, {}))
     sidecar = tmp_path / "prepared-sidecar"
     sidecar.write_bytes(b"test arm64 sidecar")
-    answers = iter(["y", "personal", "n"])
+    answers = iter(["y", "n"])
     prompts = []
 
     def ask(prompt):
@@ -198,25 +198,35 @@ def test_stock_setup_uses_detected_bot_and_confirms_owner_with_prebuilt_sidecar(
     assert wizard.installs == [wizard.state]
     assert "as Live caller and DM owner?" in prompts[0]
     assert not any("number (with country code)" in prompt for prompt in prompts)
+    assert not any("Additional Control account label" in prompt for prompt in prompts)
 
 
 def test_stock_setup_requires_owner_approval_separately_from_pairing(wizard, monkeypatch):
     monkeypatch.setattr(wizard.module, "resolve_setup_identity", lambda *_: (BOT, OWNER))
     monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (None, {}))
-    _setup(wizard, ["n", OTHER, "", "n"])
+    _setup(wizard, ["n", OTHER, "n"])
     assert wizard.settings["bot_number"] == BOT
     assert wizard.settings["owner_number"] == OTHER
     assert wizard.links == []
 
 
-def test_first_pair_uses_profile_source_and_package_without_separate_setup(wizard, monkeypatch, capsys):
+def test_first_pair_uses_profile_source_and_links_control_in_same_terminal(wizard, monkeypatch):
     seen = []
+    control = []
 
     def detect(home, source):
         seen.append((home, source))
         return BOT, OWNER
 
+    def pair_control(ctx, entry, args, **options):
+        assert ctx == wizard.ctx
+        assert entry == Path(wizard.plugin.__file__)
+        assert (wizard.state / "paired.json").is_file()
+        assert wizard.settings["unified_gateway"] is True
+        control.append((args.action, args.account, options))
+
     monkeypatch.setattr(wizard.module, "resolve_setup_identity", detect)
+    monkeypatch.setattr(wizard.module, "run_control", pair_control)
     monkeypatch.setattr(wizard.module.shutil, "which", lambda name: "/fixture/codex" if name == "codex" else None)
     wizard.settings["stock_profile"] = "default"
     parser = argparse.ArgumentParser()
@@ -226,7 +236,7 @@ def test_first_pair_uses_profile_source_and_package_without_separate_setup(wizar
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     run_setup = wizard.module.run_setup
-    answers = iter(["y"])
+    answers = iter(["y", "personal"])
     monkeypatch.setattr(wizard.module, "run_setup", lambda *args, **options:
                         run_setup(*args, ask=lambda _prompt: next(answers), **options))
 
@@ -237,7 +247,26 @@ def test_first_pair_uses_profile_source_and_package_without_separate_setup(wizar
     assert wizard.links == [BOT]
     assert not (wizard.state / "venv").exists()
     assert wizard.settings["live"]["selected"] == "codex"
-    assert "hermes -p cobalt whatsapp-control pair personal" in capsys.readouterr().out
+    assert control == [("pair", "personal", {
+        "bot_runtime": wizard.state, "owner_number": OWNER, "bot_number": BOT,
+    })]
+
+
+def test_failed_control_pair_keeps_the_verified_bot_link_and_offers_retry(wizard, monkeypatch):
+    monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (None, {}))
+
+    def pair_control(*_args, **_kwargs):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(wizard.module, "run_control", pair_control)
+    with pytest.raises(SystemExit):
+        _setup(wizard, [BOT, OWNER, "", "personal"])
+
+    assert (wizard.state / "paired.json").is_file()
+    assert wizard.settings["unified_gateway"] is True
+    assert wizard.settings["bot_number"] == BOT
+    assert any("To retry linking this Control account, run: hermes -p cobalt whatsapp-control pair personal"
+               in line for line in wizard.messages)
 
 
 @pytest.mark.parametrize("reuse", [False, True])

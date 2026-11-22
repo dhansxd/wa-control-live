@@ -103,15 +103,16 @@ hermes wa-control-live pair
 ```
 
 Paket Git membawa sidecar macOS arm64 yang diverifikasi terhadap checksum
-dan sumber paket. Hermes menyiapkan dependensi Python dan Node saat instalasi
-dengan persetujuan standar. Perintah `pair` mendeteksi bot Hermes,
-mengonfirmasi izin pemilik, lalu menampilkan QR Live untuk akun A. Plugin
-menjalankan transport yang dimiliki adapter gateway setelah akun A tertaut.
-`whatsapp-control pair <label>` menampilkan QR akun tambahan di profil yang
-sama setelah bot tertaut, termasuk saat gateway dijeda. Penautan pada gateway
-yang dijeda membuka koneksi sementara untuk QR dan menyimpan sesi akun;
-DM, telepon, dan chatbot berjalan melalui gateway. `setup` dipakai bila
-perlu mengubah pilihan audio atau menunda scan.
+dan sumber paket. Hermes menyiapkan dependensi Python dan Node dengan
+persetujuan standar di profil yang sudah menjalankan bot. Satu wizard
+`pair` mendeteksi bot, mengonfirmasi izin pemilik, menampilkan QR Live
+untuk A, lalu menawarkan QR akun Control tambahan di terminal yang sama.
+Jika gateway sudah berjalan, restart lewat Hermes sekali agar adapter
+plugin dipakai pada profil dan percakapan yang sama.
+`whatsapp-control pair <label>` tetap tersedia untuk menambah akun nanti
+atau mengulangi QR yang gagal, termasuk saat gateway dijeda. Penautan saat
+gateway dijeda hanya membuka koneksi sementara untuk QR. `setup` juga
+tersedia untuk mengubah pilihan audio.
 
 Setup menawarkan **pakai konfigurasi Hermes** dan **siapkan Live manual**.
 Pengguna memilih provider dan model yang mendukung suara Live, suara bila

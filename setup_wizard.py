@@ -1,12 +1,15 @@
 """Guide first-time setup in the active Hermes profile."""
 
+from argparse import Namespace
 import json
+from pathlib import Path
 import shutil
 import subprocess
 
 from .plugin_identity import StockBotNotPaired, resolve_setup_identity
 from .setup_live import choose_live
 from .whatsapp_control.cli import prepare as prepare_control
+from .whatsapp_control.cli import run as run_control
 from .whatsapp_control.settings import account_id, hermes_command, phone_number, private_dir, read_json
 
 
@@ -84,10 +87,6 @@ def run_setup(ctx, home, launcher, *, stock_profile=None, sidecar=None, sidecar_
         tell("Live audio will use the Codex CLI sign-in.")
     elif not pair_now or settings is None:
         settings, secrets = choose_live(ctx, ask=ask, tell=tell)
-    additional = []
-    if not pair_now:
-        labels = ask("Additional Control account labels (e.g. personal, Enter to skip): ")
-        additional = list(dict.fromkeys(account_id(label.strip()) for label in labels.split(",") if label.strip()))
     if pair_now:
         link_now = not paired
     elif not paired:
@@ -135,6 +134,19 @@ def run_setup(ctx, home, launcher, *, stock_profile=None, sidecar=None, sidecar_
     ctx.set_config("live_enabled", settings is not None)
     ctx.set_config("unified_gateway", True)
 
+    account = ""
+    if paired:
+        account = ask("Additional Control account label now (e.g. personal, Enter to skip): ").strip()
+        if account:
+            account = account_id(account)
+            try:
+                run_control(ctx, Path(__file__).with_name("__init__.py"), Namespace(action="pair", account=account),
+                            bot_runtime=state, owner_number=owner, bot_number=bot)
+            except (SystemExit, KeyboardInterrupt):
+                retry = hermes_command(home, "whatsapp-control", "pair", account)
+                tell(f"To retry linking this Control account, run: {retry}")
+                raise
+
     if not paired:
         tell(f"Show the bot's Live pairing QR when ready: {hermes_command(home, 'wa-control-live', 'pair')}")
     if sidecar is None:
@@ -145,6 +157,6 @@ def run_setup(ctx, home, launcher, *, stock_profile=None, sidecar=None, sidecar_
         tell("If the source profile still handles this bot, switch its WhatsApp routing before starting this profile's gateway.")
     if settings is None:
         tell(f"Live audio setup deferred. Configure it with: {hermes_command(home, 'wa-control-live', 'setup')}")
-    tell("To link an additional Control account, choose an account label and run:")
-    for label in additional or ["personal"]:
-        tell(f"  {hermes_command(home, 'whatsapp-control', 'pair', label)}")
+    if not account:
+        later = hermes_command(home, "whatsapp-control", "pair", "personal")
+        tell(f"To link an additional Control account later, run: {later}")

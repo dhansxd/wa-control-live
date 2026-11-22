@@ -1,14 +1,12 @@
 ## WA Control & Live
 
-Open a local terminal and show the Hermes bot's pairing QR:
+In the Hermes profile that already runs your bot, open the pairing wizard:
 
 ```sh
 hermes wa-control-live pair
 ```
 
-Scan from **WhatsApp → Linked Devices → Link a Device** on the bot's phone.
-The plugin will run with your Hermes gateway.
-
-After linking the bot, show the QR for another WhatsApp account with
-`hermes whatsapp-control pair personal`. Use the same `-p PROFILE` as your
-install on both commands when using a named profile.
+Scan the bot QR from **WhatsApp → Linked Devices → Link a Device**. Enter
+an account label such as `personal` to scan the additional Control QR
+in the same wizard. If your Hermes gateway is already running, restart it
+once with `hermes gateway restart` after pairing.

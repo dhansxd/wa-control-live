@@ -72,6 +72,11 @@ Regresi lulus **710 tes Python, 17 subtes, dan 7 tes bridge Baileys**,
 termasuk penolakan nomor bot, duplikat, dan penulisan inventaris akun saat
 gateway dijeda. Panggilan WhatsApp pada perangkat nyata masih perlu diuji.
 
+Alur penggunaan diarahkan ke profil Hermes yang sudah menjalankan bot.
+Wizard `wa-control-live pair` menawarkan QR Control setelah QR bot selesai
+di terminal yang sama. Jika QR kedua gagal, pairing bot tetap tersimpan.
+Regresi kandidat lulus **711 tes Python dan 17 subtes**.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak

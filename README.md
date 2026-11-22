@@ -15,9 +15,9 @@ Untuk melanjutkan proyek dari clone atau sesi baru, mulai dari
 
 ## Install dan pairing
 
-Gunakan Hermes Agent di macOS Apple Silicon. Setujui dependensi Python
-dan Node pada prompt resmi Hermes. Sidecar
-macOS arm64 sudah ada di paket Git dan diverifikasi oleh plugin.
+Gunakan profil Hermes yang sudah menjalankan bot WhatsApp di macOS Apple
+Silicon. Setujui dependensi Python dan Node pada prompt resmi Hermes.
+Sidecar macOS arm64 sudah ada di paket Git dan diverifikasi oleh plugin.
 
 ```sh
 hermes plugins install dhansxd/wa-control-live --enable
@@ -25,23 +25,19 @@ hermes wa-control-live pair
 ```
 
 Plugin mendeteksi bot dari pairing WhatsApp Hermes jika tersedia. Konfirmasi
-kontak pemilik, lalu buka **Perangkat Tertaut** di WhatsApp bot untuk memindai
-QR Live. Satu scan ini mengaktifkan DM pemilik, Control, dan telepon pada akun
-bot. Jalankan gateway profil Hermes seperti biasa. Plugin memulai layanannya
-bersama gateway. Ikuti petunjuk restart jika Hermes menampilkannya.
+kontak pemilik dan pindai QR Live dari **Perangkat Tertaut** di WhatsApp bot.
+Dalam wizard yang sama, masukkan label seperti `personal` untuk menautkan
+akun Control tambahan. Pindai QR kedua dari WhatsApp akun tersebut.
+Setelah selesai, jalankan `hermes gateway restart` sekali jika gateway
+profil itu sudah berjalan. Plugin akan berjalan bersama gateway Hermes.
 [Panduan plugin Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins#managing-plugins)
 
-Setelah bot tertaut, jalankan `hermes whatsapp-control pair pribadi` untuk
-akun tambahan. QR ini juga tersedia saat gateway dijeda. Pindai dari akun
-yang ingin dikontrol. Plugin membaca identitas akun dari hasil scan. Label
-`pribadi` bisa diganti. Jika akun yang memindai adalah bot, plugin
-mengarahkanmu kembali ke QR Live.
+Untuk menambah akun nanti, gunakan `hermes whatsapp-control pair pribadi`.
+QR ini juga tersedia saat gateway dijeda. Plugin membaca identitas dari
+hasil scan dan mengarahkan akun bot kembali ke QR Live.
 
-Pakai profil yang sama untuk setiap perintah dengan `hermes -p NAMA_PROFIL`.
-Jika identitas bot sudah tertaut di profil lain, gunakan
-`hermes -p PROFIL_UJI wa-control-live pair --stock-profile default`.
-Sebelum mengaktifkan gateway kedua untuk bot yang sama, tentukan profil
-yang akan menangani DM bot.
+Gunakan profil yang sama untuk semua perintah. Jika memakai profil bernama,
+tambahkan `-p NAMA_PROFIL` pada perintah Hermes.
 
 `hermes wa-control-live setup` tersedia untuk mengubah provider audio,
 mengatur izin pemilik, atau menunda scan. Pairing pertama memakai Codex CLI
