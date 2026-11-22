@@ -108,7 +108,10 @@ dengan persetujuan standar. Perintah `pair` mendeteksi bot Hermes,
 mengonfirmasi izin pemilik, lalu menampilkan QR Live untuk akun A. Plugin
 menjalankan transport yang dimiliki adapter gateway setelah akun A tertaut.
 `whatsapp-control pair <label>` menampilkan QR akun tambahan di profil yang
-sama. `setup` dipakai bila perlu mengubah pilihan audio atau menunda scan.
+sama setelah bot tertaut, termasuk saat gateway dijeda. Penautan pada gateway
+yang dijeda membuka koneksi sementara untuk QR dan menyimpan sesi akun;
+DM, telepon, dan chatbot berjalan melalui gateway. `setup` dipakai bila
+perlu mengubah pilihan audio atau menunda scan.
 
 Setup menawarkan **pakai konfigurasi Hermes** dan **siapkan Live manual**.
 Pengguna memilih provider dan model yang mendukung suara Live, suara bila

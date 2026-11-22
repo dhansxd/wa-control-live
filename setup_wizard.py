@@ -145,6 +145,6 @@ def run_setup(ctx, home, launcher, *, stock_profile=None, sidecar=None, sidecar_
         tell("If the source profile still handles this bot, switch its WhatsApp routing before starting this profile's gateway.")
     if settings is None:
         tell(f"Live audio setup deferred. Configure it with: {hermes_command(home, 'wa-control-live', 'setup')}")
-    tell("To show an additional Control QR once the gateway is running, choose an account label and run:")
+    tell("To link an additional Control account, choose an account label and run:")
     for label in additional or ["personal"]:
         tell(f"  {hermes_command(home, 'whatsapp-control', 'pair', label)}")

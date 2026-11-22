@@ -122,6 +122,36 @@ def results_list(status, key):
     return status.get(key, []) if isinstance(status, dict) else []
 
 
+async def _pair_account(account, accounts, identities, transport, check_active, save):
+    check_active()
+    if account in accounts:
+        raise ValueError("This account label is already in use.")
+    linked = False
+    try:
+        result = await transport("pair", account)
+        linked = True
+        check_active()
+        identity = result.get("identity") or {}
+        known = {identity[key] for key in ("id", "phone", "lid") if identity.get(key)}
+        if not known or any(known.intersection(identities(other)) for other in accounts):
+            raise ValueError("This WhatsApp identity is already paired or could not be identified.")
+        accounts[account] = {"_identity": identity}
+        try:
+            save()
+        except (RuntimeError, OSError, ValueError):
+            accounts.pop(account)
+            raise
+        return {"account": account, **result}
+    except (RuntimeError, OSError, ValueError, asyncio.CancelledError):
+        if linked:
+            with contextlib.suppress(RuntimeError, OSError):
+                await transport("logout", account)
+        with contextlib.suppress(RuntimeError, OSError):
+            await transport("disconnect", account)
+            await transport("remove_account", account)
+        raise
+
+
 class Service:
     def __init__(self, root, llm, is_active, *, tts_dispatch=None,
                  bot_runtime=None, owner_number=None, bot_number=None):
@@ -284,23 +314,12 @@ class Service:
             raise ValueError("This account label is already in use.")
         self.qr_writer[account] = writer
         try:
-            result = await self.transport("pair", account)
-            self.check_active()
-            identity = result.get("identity") or {}
-            known = {value for key, value in identity.items() if key in {"id", "phone", "lid"} and value}
-            if not known or any(known.intersection(self.identities(other)) for other in self.accounts):
-                await self.unlink(account)
-                raise ValueError("This WhatsApp identity is already paired or could not be identified.")
-            self.accounts[account] = {"_identity": identity}
+            result = await _pair_account(account, self.accounts, self.identities, self.transport,
+                                         self.check_active, self.save_accounts)
             self.ready[account] = result
-            self.save_accounts()
-            return {"account": account, **result}
-        except (RuntimeError, OSError):
-            if account not in self.accounts:
-                with contextlib.suppress(RuntimeError, OSError):
-                    await self.bridge.call("disconnect", account)
-                    await self.bridge.call("remove_account", account)
-                self.ready.pop(account, None)
+            return result
+        except (RuntimeError, OSError, ValueError, asyncio.CancelledError):
+            self.ready.pop(account, None)
             raise
         finally:
             self.qr_writer.pop(account, None)
@@ -914,19 +933,77 @@ class Service:
                 loop.remove_signal_handler(sig)
 
 
-def run_service(root, llm, active, *, tts_dispatch=None, bot_runtime=None, owner_number=None, bot_number=None):
+@contextlib.contextmanager
+def _worker_lock(root):
     # This lock also serializes state cleanup against startup.
     lock_dir = private_dir(socket_dir(root))
-    with (lock_dir / "lock").open("a", encoding="utf-8") as lock:
+    lock_path = lock_dir / "lock"
+    with open(lock_path, "a", encoding="utf-8",
+              opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW, 0o600)) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise RuntimeError("The WhatsApp Control service is already running.") from error
-        if not (lock_dir / "lock").exists() or not os.path.samestat(os.fstat(lock.fileno()), (lock_dir / "lock").stat()):
-            raise RuntimeError("The worker lock changed during cleanup. Run setup or retry serve.")
+        if not lock_path.exists() or not os.path.samestat(os.fstat(lock.fileno()), lock_path.lstat()):
+            raise RuntimeError("The worker lock changed during cleanup. Retry the operation.")
+        yield
+
+
+def run_service(root, llm, active, *, tts_dispatch=None, bot_runtime=None, owner_number=None, bot_number=None):
+    with _worker_lock(root):
         if not active():
             raise RuntimeError("WhatsApp Control is disabled or shutting down.")
         if bot_runtime is None and not read_json(root / "setup.json").get("owner"):
             raise RuntimeError("Run hermes whatsapp-control setup first.")
         asyncio.run(Service(root, llm, active, tts_dispatch=tts_dispatch, bot_runtime=bot_runtime,
                             owner_number=owner_number, bot_number=bot_number).run())
+
+
+def pair_offline(root, account, show_qr, active, *, bot_runtime, bot_number):
+    """Link an additional account with only the Baileys QR connection."""
+    account = account_id(account)
+    bot_runtime = Path(bot_runtime)
+    bot_number = phone_number(bot_number)
+
+    def check_active():
+        if not active():
+            raise RuntimeError("WhatsApp Control is disabled or shutting down.")
+        if (not bot_number or not (bot_runtime / "paired.json").is_file()
+                or (bot_runtime / "unlink-request.json").exists()
+                or read_json(bot_runtime / "config.json").get("bot_number") != bot_number):
+            raise RuntimeError("Link the Hermes bot before pairing an additional WhatsApp account.")
+
+    def on_event(event):
+        if (event.get("event") == "qr" and event.get("account") == account
+                and event.get("terminal") and active()):
+            show_qr(event)
+
+    async def link():
+        check_active()
+        private_dir(root)
+        bridge = Bridge(root, on_event)
+        account_path = root / "accounts.json"
+        if account_path.is_symlink() or (account_path.exists() and not account_path.is_file()):
+            raise ValueError("WhatsApp Control's account inventory must be local to this profile.")
+        accounts = read_json(account_path)
+
+        def identities(other):
+            identity = accounts[other].get("_identity", {})
+            return (identity.get(key) for key in ("id", "lid", "phone"))
+
+        async def transport(op, label):
+            args = {"reserved_bot_number": bot_number} if op == "pair" else None
+            return await bridge.call(op, label, args)
+
+        if account in accounts:
+            raise ValueError("This account label is already in use.")
+        try:
+            await bridge.start()
+            result = await _pair_account(account, accounts, identities, transport, check_active,
+                                         lambda: write_json(account_path, accounts))
+            return {**result, "status": "paired"}
+        finally:
+            await bridge.close()
+
+    with _worker_lock(root):
+        return asyncio.run(link())

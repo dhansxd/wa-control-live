@@ -5,9 +5,10 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest import IsolatedAsyncioTestCase
-from unittest.mock import ANY, AsyncMock, patch
+from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest.mock import ANY, AsyncMock, call, patch
 
 from aiohttp import web
 
@@ -19,10 +20,99 @@ PLUGIN = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = PLUGIN
 SPEC.loader.exec_module(PLUGIN)
 
-from unified_control_test.whatsapp_control import rust_bridge
+from unified_control_test.whatsapp_control import rust_bridge, service as service_module
 from unified_control_test.whatsapp_control.runtime import BridgeError, activation_ids, active_install
 from unified_control_test.whatsapp_control.service import Service
 from unified_control_test.whatsapp_control.settings import read_json, write_json
+
+
+class OfflinePairTest(TestCase):
+    bot = "15550100202"
+    identity = {"id": "15550100203@s.whatsapp.net", "phone": "15550100203@s.whatsapp.net"}
+
+    def setUp(self):
+        self.workspace = Path(self.enterContext(TemporaryDirectory()))
+        self.root = self.workspace / "control"
+        self.runtime = self.workspace / "unified"
+        self.runtime.mkdir()
+        (self.runtime / "paired.json").touch()
+        write_json(self.runtime / "config.json", {"bot_number": self.bot})
+        self.enterContext(patch.object(service_module, "socket_dir", return_value=self.workspace / "socket"))
+
+    def test_pair_without_gateway_uses_only_qr_bridge_and_holds_worker_lock(self):
+        events = []
+        bridge = SimpleNamespace(start=AsyncMock(), call=AsyncMock(), close=AsyncMock())
+
+        def make_bridge(root, on_event):
+            self.assertEqual(root, self.root)
+
+            async def pair(op, account, args):
+                self.assertEqual((op, account, args), ("pair", "personal", {"reserved_bot_number": self.bot}))
+                with self.assertRaisesRegex(RuntimeError, "already running"):
+                    with service_module._worker_lock(root):
+                        self.fail("The normal worker can compete with offline pairing.")
+                on_event({"event": "message", "account": "personal", "terminal": "ignored"})
+                on_event({"event": "qr", "account": "other", "terminal": "ignored"})
+                on_event({"event": "qr", "account": "personal", "terminal": "synthetic QR"})
+                return {"status": "connected", "identity": self.identity}
+
+            bridge.call.side_effect = pair
+            return bridge
+
+        with patch.object(service_module, "Bridge", side_effect=make_bridge):
+            result = service_module.pair_offline(
+                self.root, "personal", events.append, lambda: True, bot_runtime=self.runtime, bot_number=self.bot)
+
+        self.assertEqual(result, {"account": "personal", "status": "paired", "identity": self.identity})
+        self.assertEqual(events, [{"event": "qr", "account": "personal", "terminal": "synthetic QR"}])
+        bridge.start.assert_awaited_once()
+        bridge.close.assert_awaited_once()
+        self.assertEqual(read_json(self.root / "accounts.json"), {"personal": {"_identity": self.identity}})
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"accounts.json"})
+        with service_module._worker_lock(self.root):
+            pass
+
+    def test_duplicate_identity_rolls_back_new_link_and_keeps_existing_account(self):
+        self.root.mkdir()
+        accounts = {"existing": {"_identity": self.identity}}
+        write_json(self.root / "accounts.json", accounts)
+        bridge = SimpleNamespace(
+            start=AsyncMock(), close=AsyncMock(), call=AsyncMock(side_effect=[
+                {"status": "connected", "identity": self.identity}, {}, {}, {},
+            ]),
+        )
+        with patch.object(service_module, "Bridge", return_value=bridge), self.assertRaisesRegex(
+                ValueError, "already paired"):
+            service_module.pair_offline(
+                self.root, "personal", lambda _event: None, lambda: True,
+                bot_runtime=self.runtime, bot_number=self.bot)
+        bridge.call.assert_has_awaits([
+            call("pair", "personal", {"reserved_bot_number": self.bot}),
+            call("logout", "personal", None),
+            call("disconnect", "personal", None),
+            call("remove_account", "personal", None),
+        ])
+        bridge.close.assert_awaited_once()
+        self.assertEqual(read_json(self.root / "accounts.json"), accounts)
+
+    def test_rejects_unpaired_bot_and_nonlocal_inventory_before_starting_bridge(self):
+        self.root.mkdir()
+        inventory = self.workspace / "elsewhere.json"
+        write_json(inventory, {})
+        (self.root / "accounts.json").symlink_to(inventory)
+        bridge = SimpleNamespace(start=AsyncMock())
+        with patch.object(service_module, "Bridge", return_value=bridge), self.assertRaisesRegex(
+                ValueError, "account inventory"):
+            service_module.pair_offline(
+                self.root, "personal", lambda _event: None, lambda: True,
+                bot_runtime=self.runtime, bot_number=self.bot)
+        (self.runtime / "paired.json").unlink()
+        with patch.object(service_module, "Bridge", return_value=bridge), self.assertRaisesRegex(
+                RuntimeError, "Link the Hermes bot"):
+            service_module.pair_offline(
+                self.root, "personal", lambda _event: None, lambda: True,
+                bot_runtime=self.runtime, bot_number=self.bot)
+        bridge.start.assert_not_awaited()
 
 
 class UnifiedControlTest(IsolatedAsyncioTestCase):

@@ -1,7 +1,7 @@
 # Status pengembangan
 
 Repositori ini menyimpan snapshot sumber pengembangan WA Control & Live.
-Jika memasang dari mesin baru, ikuti [prasyarat, instalasi, dan setup](README.md#setup-plugin).
+Jika memasang dari mesin baru, ikuti [instalasi dan pairing](README.md#install-dan-pairing).
 Untuk melanjutkan pengembangan, buka [handoff](HANDOFF.md),
 [PRD dan checklist](PLAN.md), dan [aturan pengembangan](AGENTS.md).
 
@@ -63,6 +63,14 @@ disable, enable kembali, dan uninstall lewat CLI Hermes lulus. Profil
 uji lokal memverifikasi pemuatan Node yang disiapkan Hermes dan deteksi
 bot yang sudah tertaut sebelum QR. Scan QR, pergantian rute gateway, dan
 panggilan WhatsApp nyata belum dijalankan.
+
+Pada `35da140`, bot berhasil ditautkan di perangkat nyata. QR akun
+tambahan masih terblokir saat gateway profil uji dijeda. Perbaikan membuka
+koneksi Baileys sementara hanya untuk pairing akun tambahan dan memakai
+lock serta validasi identitas akun yang sama dengan layanan Control.
+Regresi lulus **710 tes Python, 17 subtes, dan 7 tes bridge Baileys**,
+termasuk penolakan nomor bot, duplikat, dan penulisan inventaris akun saat
+gateway dijeda. Panggilan WhatsApp pada perangkat nyata masih perlu diuji.
 
 ## Audit acuan ChatGPT Live Desktop
 

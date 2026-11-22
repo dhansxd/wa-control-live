@@ -184,3 +184,34 @@ class LifecycleTest(unittest.TestCase):
                     self.assertRaises(SystemExit):
                 cli.run(None, "", SimpleNamespace(action=action, account="personal"), bot_runtime=bot_runtime)
             self.assertIn(f"`hermes -p cobalt {command} serve`", output.getvalue())
+
+    def test_linked_bot_allows_additional_qr_when_control_service_is_stopped(self):
+        home = self.root.parent / "profiles" / "cobalt"
+        bot_runtime = self.root.parent / "unified"
+        bot_runtime.mkdir()
+        (bot_runtime / "paired.json").touch()
+        constants = SimpleNamespace(get_hermes_home=lambda: home)
+        ctx = SimpleNamespace(plugin_id="wa-control-live")
+        entry = Path(cli.__file__)
+        result = {"account": "personal"}
+
+        def pair(root, account, show_qr, active, **options):
+            self.assertEqual((root, account), (cli.runtime_path(home), "personal"))
+            self.assertEqual(options, {"bot_runtime": bot_runtime, "bot_number": "15550100100"})
+            self.assertTrue(active())
+            show_qr({"terminal": "synthetic QR"})
+            return result
+
+        with patch.dict(sys.modules, {"hermes_constants": constants}), \
+                patch.object(cli, "invoke", side_effect=cli.ServiceStopped("offline")), \
+                patch.object(cli, "prepare") as prepare, \
+                patch.object(cli, "active_install", return_value=True), \
+                patch("whatsapp_control_lifecycle_test.service.pair_offline", side_effect=pair), \
+                patch.object(sys, "stdout", new_callable=StringIO) as output, \
+                patch.object(output, "isatty", return_value=True):
+            cli.run(ctx, entry, SimpleNamespace(action="pair", account="personal"),
+                    bot_runtime=bot_runtime, bot_number="15550100100")
+        self.assertIn("additional Control account 'personal'", output.getvalue())
+        self.assertIn("synthetic QR", output.getvalue())
+        prepare.assert_called_once_with(entry)
+        self.show.assert_called_once_with(result)

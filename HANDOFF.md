@@ -42,6 +42,9 @@ Contoh permintaan dari root repo:
   memakai snapshot Git lokal dengan dependensi dari prompt Hermes. Alur mulai
   dari `wa-control-live pair`. Gateway Hermes memiliki transport setelah
   perangkat tertaut. Lihat [status](STATUS.md#hasil-verifikasi) untuk hasil uji.
+- Setelah bot tertaut, `whatsapp-control pair <label>` dapat menautkan akun
+  tambahan saat gateway profil uji dijeda. Jalur QR memakai lock worker
+  Control dan menutup koneksinya setelah akun tersimpan.
 - Tiga perbaikan yang sudah memiliki regresi lokal adalah kelanjutan akun
   sehat saat lookup semua kontak gagal di akun lain, deduplikasi DM saat
   provider berpindah, dan satu klip lokal saat pemulihan audio berlangsung lama.

@@ -237,12 +237,26 @@ def run(ctx, entry, args, *, bot_runtime=None, owner_number=None, bot_number=Non
             try:
                 result = invoke(root, args.action, {"account": account}, show_qr)
             except ServiceStopped as error:
-                if bot_runtime is not None and read_json(bot_runtime / "config.json").get("hermes_runtime"):
+                if args.action == "pair" and bot_runtime is not None and (bot_runtime / "paired.json").is_file():
+                    from .service import pair_offline
+
+                    prepare(entry)
+                    st = Path(entry).stat()
+                    generation = (st.st_dev, st.st_ino)
+                    result = pair_offline(
+                        root, account, show_qr, lambda: active_install(entry, activation_ids(ctx), generation),
+                        bot_runtime=bot_runtime, bot_number=bot_number,
+                    )
+                elif bot_runtime is not None and read_json(bot_runtime / "config.json").get("hermes_runtime"):
+                    if args.action == "pair":
+                        pair = hermes_command(home, "wa-control-live", "pair")
+                        raise RuntimeError(f"Link the Hermes bot first with `{pair}`.") from error
                     status = hermes_command(home, "gateway", "status")
                     raise RuntimeError(f"Start this profile's Hermes gateway after linking its bot. Check with `{status}`.") from error
-                command = "wa-control-live" if bot_runtime is not None else "whatsapp-control"
-                serve = hermes_command(home, command, "serve")
-                raise RuntimeError(f"Service is stopped. Start it in another terminal with `{serve}`.") from error
+                else:
+                    command = "wa-control-live" if bot_runtime is not None else "whatsapp-control"
+                    serve = hermes_command(home, command, "serve")
+                    raise RuntimeError(f"Service is stopped. Start it in another terminal with `{serve}`.") from error
             show(result)
         elif args.action == "unlink":
             show(invoke(root, "unlink", {"account": account_id(args.account)}))

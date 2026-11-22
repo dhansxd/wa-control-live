@@ -31,10 +31,11 @@ bot. Jalankan gateway profil Hermes seperti biasa. Plugin memulai layanannya
 bersama gateway. Ikuti petunjuk restart jika Hermes menampilkannya.
 [Panduan plugin Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins#managing-plugins)
 
-Untuk akun tambahan, jalankan `hermes whatsapp-control pair pribadi` saat
-gateway berjalan. Pindai QR dari akun yang ingin dikontrol. Plugin membaca
-identitas akun dari hasil scan. Label `pribadi` bisa diganti. Jika akun yang
-memindai adalah bot, plugin mengarahkanmu kembali ke QR Live.
+Setelah bot tertaut, jalankan `hermes whatsapp-control pair pribadi` untuk
+akun tambahan. QR ini juga tersedia saat gateway dijeda. Pindai dari akun
+yang ingin dikontrol. Plugin membaca identitas akun dari hasil scan. Label
+`pribadi` bisa diganti. Jika akun yang memindai adalah bot, plugin
+mengarahkanmu kembali ke QR Live.
 
 Pakai profil yang sama untuk setiap perintah dengan `hermes -p NAMA_PROFIL`.
 Jika identitas bot sudah tertaut di profil lain, gunakan
@@ -161,8 +162,8 @@ Status menyebut apakah audio diserahkan ke jalur media dan apakah WhatsApp
 menerima pesan. Untuk memakai notifikasi suara dan DM, build sidecar gabungan
 dari source yang menyertakan fitur ini.
 
-Selagi `serve` berjalan, daftarkan akun tambahan dengan
-`hermes whatsapp-control pair <label>`. Gunakan `hermes whatsapp-control status`
+Daftarkan akun tambahan dengan `hermes whatsapp-control pair <label>`
+setelah menautkan bot. Gunakan `hermes whatsapp-control status`
 untuk melihat label akun yang tersedia. Atur chatbot tiap akun dari percakapan
 pemilik dengan Hermes atau melalui `hermes whatsapp-control configure`.
 Format konfigurasi dan operasi tersedia di [panduan WhatsApp Control](whatsapp_control/README.md).
