@@ -47,12 +47,13 @@ aturan seperti menutup sendiri saat pekerjaan selesai atau saat hening.
 
 | Skenario | Perilaku yang harus dialami pemilik |
 | --- | --- |
-| Mulai dari DM, lalu telepon | Percakapan suara memakai konteks yang sudah relevan, termasuk lampiran dan pekerjaan aktif. Sesudah telepon, lanjutkan lewat DM yang sama. |
+| Mulai dari DM, lalu telepon | Hermes melanjutkan percakapan yang sama, dengan identitas, konteks, lampiran, dan pekerjaan aktif dari DM. Sesudah telepon, lanjutkan lewat DM yang sama. |
 | Minta pekerjaan yang butuh waktu, lalu beralih ke obrolan biasa | Asisten tetap bisa menjawab secara alami selama Hermes bekerja. Ucapan biasa atau pertanyaan progres tidak mengubah, mengulang, atau membatalkan tugas. Progres dan hasil berasal dari tugas yang sama. |
+| Diam setelah Hermes selesai menjawab | Hermes memberi ruang kepada pemilik untuk bicara. Pembaruan status rutin tetap tersedia saat ditanya. Hasil baru dan kendala yang perlu ditangani tetap dapat disampaikan. |
 | Mulai bicara saat asisten sedang menjawab | Audio jawaban lama berhenti saat pemilik menyela, termasuk saat model selesai menghasilkan jawaban tetapi audio masih antre. Panggilan menerima ucapan baru. Tugas aktif tetap berjalan. |
 | Beri arahan baru untuk tugas tertentu | Cocokkan tugas yang dimaksud dan gunakan jalur perubahan arahan Hermes. Permintaan berhenti bicara, permintaan mengakhiri telepon, dan permintaan membatalkan tugas adalah tindakan yang berbeda. |
 | Minta asisten mengakhiri panggilan saat kerja masih berjalan | Asisten bisa menutup panggilan secara nyata setelah memahami maksud pemilik. Uji salam penutup yang alami, ucapan susulan sebelum sambungan putus, dan hasil dari tugas yang sama tetap tersedia di DM. |
-| Hasil atau kebutuhan persetujuan muncul saat sedang mengobrol | Sampaikan status yang benar tanpa merebut giliran pemilik. Gunakan mekanisme persetujuan asli Hermes. |
+| Hasil atau kebutuhan persetujuan muncul saat sedang mengobrol | Sampaikan status yang benar tanpa merebut giliran pemilik. Sebut kebutuhan persetujuan saat Hermes benar-benar memerlukannya dan gunakan mekanisme persetujuan asli Hermes. |
 
 Bedakan akhir produksi suara di provider, audio yang dikirim sidecar, dan
 audio yang terdengar di perangkat. Respons yang disela tidak boleh dianggap

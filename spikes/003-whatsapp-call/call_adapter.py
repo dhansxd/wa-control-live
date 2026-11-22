@@ -33,9 +33,10 @@ from probe import AppServer, codex_command, event_summary, safe_text, start_para
 from provider_failure import build_provider_failure, encode_notice_pcm
 
 
-FALLBACK_PERSONA = 'Kamu adalah asisten dalam panggilan WhatsApp ini.'
+FALLBACK_PERSONA = 'Kamu adalah Hermes Agent.'
 CALL_PROMPT = (
-    'Kamu sedang berbicara dengan pemilik akun dalam panggilan WhatsApp yang sedang tersambung. '
+    'Lanjutkan percakapan DM WhatsApp dengan pemilik akun lewat telepon ini. '
+    'Gunakan identitas dan cara bicaramu yang sama seperti di DM. '
     'Pesan dan transkrip dari DM tetap konteks chat, termasuk pesan suara yang dikirim ke DM. '
     'Entri riwayat bertanda whatsapp_call berasal dari panggilan sebelumnya. '
     'Ikuti bahasa dan alur percakapan pemilik akun dengan wajar. '
@@ -50,7 +51,8 @@ CALL_PROMPT = (
     'Pakai progres dan hasil dari pekerjaan DM yang sama, termasuk saat membahas lampiran. '
     'Ajukan delegasi hanya untuk tindakan atau informasi yang memerlukan akses ke sesi WhatsApp atau alat. '
     'Jika pemilik akun memilih agar hasil pekerjaan tetap di DM, teruskan pilihan itu ke client. '
-    'Saat menunggu konfirmasi, jangan bacakan isinya atau menebak apakah sudah terkirim. '
+    'Minta persetujuan atau penjelasan hanya jika pekerjaan memang membutuhkannya. '
+    'Pekerjaan yang masih berjalan tidak membutuhkan konfirmasi dari pemilik. '
     'Kalau ia kemudian minta mendengar hasilnya, ambil hasil pekerjaan yang sama. '
     'Kalau pemilik akun bertanya apa pekerjaan masih berjalan atau sedang sampai mana sekarang, '
     'minta status terkini lewat client. Sebelum ada status itu, jangan menebak pekerjaan sedang '
@@ -63,11 +65,13 @@ CALL_PROMPT = (
     'Teruskan perubahan arahan untuk pekerjaan yang sedang berjalan, dan mulai tugas hanya '
     'untuk permintaan baru yang membutuhkan alat atau pemeriksaan. '
     'Kalau berguna untuk percakapan, tanggapi dengan kata-katamu sendiri sebelum mulai mengerjakan. '
+    'Setelah selesai menjawab, beri ruang pemilik untuk bicara. Jangan ulangi jawaban atau '
+    'laporkan perubahan status rutin tanpa diminta. Sampaikan hasil baru atau kendala yang perlu ditangani. '
     'Sampaikan hasil sesuai yang tersedia; status pekerjaan selesai tidak mengonfirmasi pesan terkirim. '
     'Pesan DM yang ditambahkan selama panggilan adalah konteks; jangan membacakannya tanpa diminta.'
 )
 WORK_STATUS_CONTEXT = {
-    'pending': 'Pekerjaan diterima, status terkininya belum terkonfirmasi.',
+    'pending': 'Permintaan diterima. Status terbaru belum tersedia.',
     'queued': 'Pekerjaan menunggu giliran.',
     'started': 'Pekerjaan masih berjalan.',
     'approval_required': 'Pekerjaan menunggu persetujuan pemilik akun di chat.',
@@ -208,7 +212,7 @@ def dm_delivery_context(result):
             return 'Teks hasil sudah dikirim ke DM. Pengiriman lampiran belum terkonfirmasi.'
         return 'Teks hasil sudah dikirim ke DM.'
     if state == 'pending':
-        return 'Teks hasil sedang menunggu konfirmasi pengiriman di DM.'
+        return 'Pengiriman teks hasil ke DM masih dalam proses.'
     return 'Pengiriman hasil di DM belum terkonfirmasi.'
 
 
@@ -854,6 +858,7 @@ class LiveCall:
         self.current_spoken_turn = None
         self.spoken_turn_final = False
         self.assistant_reply_turn = None
+        self.spoken_turn_audio_started = False
         self.spoken_reply = {}
         self.pending_spoken_replies = {}
         self.exchange_queued = False
@@ -1498,6 +1503,9 @@ class LiveCall:
                 self.playout_expected_until = max(
                     self.playout_expected_until, self.last_speech_activity + PLAYOUT_MARGIN_SECONDS,
                 ) + (len(data) / (24_000 * 2))
+                if self.current_spoken_turn and not self.result_acknowledged:
+                    # Untagged PCM can arrive before the assistant's turn.created.
+                    self.spoken_turn_audio_started = True
             await self.send(audio_envelope(data))
             if audible and self.pending_end_call and self.assistant_reply_turn:
                 self.farewell_audio_sent = True
@@ -1630,6 +1638,7 @@ class LiveCall:
                     self.current_spoken_turn = turn_id
                     self.spoken_turn_final = False
                     self.assistant_reply_turn = None
+                    self.spoken_turn_audio_started = False
                     self.active_reply_turn = None
                     self.result_speech_start_deadline = None
                     self.result_acknowledged = False
@@ -1865,8 +1874,7 @@ class LiveCall:
                     self.shared_work_turns.add(turn_id)
                     await self.append_handoff(
                         item_id, 'Pemilik akun memilih menerima hasil pekerjaan ini di DM. '
-                        'Akui pilihannya dengan wajar. Biarkan isi hasil di DM. '
-                        'Pilihan ini belum mengonfirmasi pengiriman.',
+                        'Akui pilihannya dengan wajar. Biarkan isi hasil di DM.',
                         channel='speakable' if turn_id == self.current_spoken_turn else 'commentary',
                     )
                     return
@@ -1906,7 +1914,8 @@ class LiveCall:
                 self.report['handoff_route_unavailable'] = self.report.get('handoff_route_unavailable', 0) + 1
                 quiet += ' Belum ada pekerjaan baru atau pengiriman yang terkonfirmasi untuk ucapan ini.'
             # If V3 already began answering after the first ACK, don't trigger a second reply.
-            if turn_id == self.current_spoken_turn and not (self.assistant_reply_turn or self.spoken_reply):
+            if (turn_id == self.current_spoken_turn
+                    and not (self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started)):
                 await self.append_handoff(item_id, quiet)
             elif not released_early:
                 await self.append_handoff(item_id, quiet, channel='commentary')
@@ -1935,7 +1944,7 @@ class LiveCall:
         self.call_work.add(admission_id)
         if not released_early:
             if not await self.append_handoff(
-                item_id, 'Tunggu pembaruan terkonfirmasi sebelum menyebut status pekerjaan.',
+                item_id, 'Status terbaru sedang diperiksa. Jawab ketika statusnya tersedia.',
                 channel='commentary',
             ):
                 item_id = None
@@ -2021,14 +2030,15 @@ class LiveCall:
                 self.report.setdefault('shared_dm_receipts', {})[item_id] = admission_id
             if admission_id in self.dm_only_results:
                 if item_id is not None and current:
+                    delivery = ' ' + dm_delivery_context(result) if result.get('text_delivery') == 'sent' else ''
                     await self.append_handoff(
                         item_id, 'Pekerjaan selesai. Pemilik akun memilih menerima hasilnya di DM. '
-                        'Sampaikan status saja dengan kata-katamu sendiri. ' + dm_delivery_context(result),
+                        'Sampaikan status pekerjaan saja dengan kata-katamu sendiri.' + delivery,
                     )
                 return
             text = (
-                'Sampaikan hasil pekerjaanmu berikut dengan kata-katamu sendiri, sesuai obrolan. '
-                'Sebutkan status pengiriman hanya jika relevan. ' + dm_delivery_context(result) + '\n' + output
+                'Sampaikan hasil pekerjaanmu berikut dengan kata-katamu sendiri, sesuai obrolan.\n'
+                + output
             )
             await self.present_work_result(item_id, turn_id, admission_id, text, repeat=repeat)
         elif item_id is not None:
@@ -2092,10 +2102,11 @@ class LiveCall:
                     )
             return
         not_offered = admission_id not in self.offered_work_results
-        preview_pending = (self.work_preview_start is not None
-                           and self.work_preview_start[1] > asyncio.get_running_loop().time())
+        now = asyncio.get_running_loop().time()
+        preview_pending = self.work_preview_start is not None and self.work_preview_start[1] > now
         if (item_id is not None and turn_id == self.current_spoken_turn
-                and not preview_pending and (repeat or (not_offered and self.active_reply_turn is None))):
+                and (repeat or not_offered) and not preview_pending and self.active_reply_turn is None
+                and self.playout_expected_until <= now):
             self.pending_work_speech[admission_id] = asyncio.get_running_loop().create_future()
             accepted = False
             try:
@@ -2104,7 +2115,7 @@ class LiveCall:
                 self.finish_work_speech(admission_id, accepted)
         elif self.connection.can_speak and (not_offered or (repeat and turn_id == self.current_spoken_turn)):
             if item_id is not None:
-                # A quiet update for an older turn must not delay the live announcement.
+                # A quiet context update must not hold up the queued live announcement.
                 self.spawn(self.append_handoff(item_id, text, channel='commentary'))
             await self.announce_work_result(admission_id, text, repeat_turn=turn_id if repeat else None)
         elif item_id is not None:
@@ -2124,6 +2135,7 @@ class LiveCall:
         return ((self.current_spoken_turn is None or self.spoken_turn_final) and self.active_reply_turn is None
                 and self.current_spoken_turn not in self.routing_turns and self.result_speech_start_deadline is None
                 and self.work_preview_start is None
+                and self.playout_expected_until <= now
                 and now - self.last_speech_activity >= RESULT_SPEECH_QUIET_SECONDS)
 
     async def send_work_speech(self, text, *, preview=False):
@@ -2172,7 +2184,7 @@ class LiveCall:
         if not released_early:
             result, acknowledged = await asyncio.gather(
                 submit,
-                self.append_handoff(item_id, 'Tanggapi dengan wajar sambil menunggu status terkonfirmasi.',
+                self.append_handoff(item_id, 'Tanggapi permintaan ini dengan wajar dan tetap ikuti alur percakapan.',
                                     channel='commentary'),
             )
         else:
@@ -2187,8 +2199,13 @@ class LiveCall:
             return
         if acknowledged:
             current = turn_id == self.current_spoken_turn
-            acknowledged = await self.append_handoff(item_id, text, channel='speakable' if current else 'commentary',
-                                                     audio_turn=turn_id if current else None)
+            provisional = status in {'pending', 'queued', 'started', 'unknown'}
+            already_replied = self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started
+            audible = current and (not provisional or not already_replied)
+            acknowledged = await self.append_handoff(
+                item_id, text, channel='speakable' if audible else 'commentary',
+                audio_turn=turn_id if audible else None,
+            )
         if (status in WORK_OPEN_STATUSES | {'unknown'} and admission_id
                 and admission_id not in self.work_followers):
             self.watch_dm_work(admission_id, item_id if acknowledged else None, turn_id, pending_reported=True)
@@ -2249,7 +2266,6 @@ class LiveCall:
             self.report['backend_completed_delegations'].append(item_id)
             self.report.setdefault('agent_receipts', {})[item_id] = {'admission_id': admission_id}
             return ('Gunakan isi hasil yang tersedia untuk menjawab dengan wajar dan ringkas. '
-                    'Status ini hanya mengonfirmasi pekerjaan, bukan pengiriman pesan atau lampiran. '
                     'Kalau pemilik akun meminta hasil lengkap, bacakan bagian yang tersedia tanpa mengarang.\n'
                     + result['output']), status, admission_id
         text = {

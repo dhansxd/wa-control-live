@@ -89,6 +89,21 @@ Regresi lulus **711 tes Python, 17 subtes, 7 tes Baileys, dan 87 tes Rust**.
 Tujuh tes provider opt-in dilewati dalam suite Rust. Uji ulang DM dan
 panggilan WhatsApp dilakukan pada perangkat setelah paket baru dipasang.
 
+Pada `2e61d62`, panggilan WhatsApp melalui Codex Realtime membuka sesi DM
+Hermes yang sama dan tiga tugas Hermes selesai. Riwayat menyimpan dua
+giliran asisten tambahan tanpa ucapan pemilik di antaranya. Adapter dapat
+meminta jawaban bersuara ketika PCM jawaban sudah tiba tetapi event giliran
+belum datang, dan menyuarakan status sementara setelah jawaban dimulai.
+
+Kandidat berikutnya memakai identitas Hermes dari DM. Status antre dan
+sedang berjalan masuk ke konteks jika Hermes sudah mulai menjawab. Hasil
+baru menunggu antrean audio sebelumnya selesai. Pertanyaan progres dan
+persetujuan asli Hermes tetap mengikuti tugas yang sama. Regresi lulus
+**720 tes Python, 17 subtes, dan 7 tes Baileys**. Pada probe Codex Realtime dengan ucapan
+sintetis dan jeda sekitar sepuluh detik, Hermes menyebut identitasnya dalam
+satu jawaban dengan audio bersuara. Panggilan WhatsApp dengan kandidat ini
+dan uji skenario yang sama di ChatGPT Desktop masih perlu diamati.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak
