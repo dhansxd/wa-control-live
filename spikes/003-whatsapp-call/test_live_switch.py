@@ -12,6 +12,7 @@ import pytest
 from aiohttp import ClientSession, WSMsgType, web
 
 from call_adapter import CodexLoginRequired, LiveCall, STATE, audio_envelope, create_app, provider_connector
+from live_agent import _visible_history
 from live_routing import LiveProviderPool
 
 
@@ -273,6 +274,146 @@ def test_switch_keeps_one_whatsapp_socket_hermes_session_and_accepted_work(tmp_p
                 assert len(jobs.submissions) == 1 and ADMISSION in voice.offered_work_results
                 status = await health(client, url)
                 assert status['active_provider'] == {'provider': 'gemini', 'account': 'a'}
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('late_context_available', [True, False])
+def test_switch_replays_final_voice_turns_once_before_replacement_receives_audio(tmp_path, late_context_available):
+    async def exercise():
+        release, snapshot_started, release_snapshot = (asyncio.Event() for _ in range(3))
+
+        class TranscriptJobs(Jobs):
+            def __init__(self):
+                super().__init__()
+                self.history = []
+                self.context_reads = 0
+
+            async def prepare_context(self):
+                context = await super().prepare_context()
+                self.context_reads += 1
+                if self.context_reads > 1:
+                    snapshot_started.set()
+                    await release_snapshot.wait()
+                return {**context, 'history': self.history.copy()}
+
+            async def save_exchange(self, session_id, exchange, **_kwargs):
+                assert session_id == SESSION
+                for role in ('user', 'assistant'):
+                    if transcript := exchange[role]:
+                        self.history.append({
+                            'role': role, 'text': transcript, 'source': 'whatsapp_call',
+                            '_message_refs': [f"wa-control-live:{exchange['exchange_id']}:{role}"],
+                        })
+                return {'status': 'saved'}
+
+        jobs = TranscriptJobs()
+        async with make_app(tmp_path, pauses={('gemini', 'a'): release}, jobs=jobs) as (app, client, url, opened):
+            async with client.ws_connect(url + '/live') as ws:
+                await ws.send_json({'setup': {}})
+                assert await ws.receive_json(timeout=2) == {'setupComplete': {}}
+                _, old = await asyncio.wait_for(opened.get(), 2)
+                voice = app[STATE]['voice']
+                socket = app[STATE]['active']
+                _, status, admission = await voice.submit_task('earlier-item', 'earlier-task', 'Kerjakan ini')
+                assert (status, admission) == ('started', ADMISSION)
+
+                async def finish_turn(turn_id, role, transcript):
+                    turn = {'id': turn_id, 'role': role}
+                    await old.scope.on_data({'type': 'turn.created', 'turn': turn})
+                    await old.scope.on_data({'type': 'turn.done', 'turn': {**turn, 'transcript': transcript}})
+                    field = 'inputTranscription' if role == 'user' else 'outputTranscription'
+                    assert await ws.receive_json(timeout=2) == {
+                        'serverContent': {field: {'text': transcript}, 'turnComplete': True},
+                    }
+
+                earlier_user = 'Bahas nama proyek kita.'
+                earlier_reply = 'Silakan sebutkan nama proyeknya.'
+                await finish_turn('before', 'user', earlier_user)
+                await finish_turn('before-reply', 'assistant', earlier_reply)
+
+                late_user = 'Satu tambahan saat audio berpindah.'
+                late_turn = None
+                interrupted = {'serverContent': {'interrupted': True}}
+                send = voice.send
+
+                async def send_with_inflight_transcript(message):
+                    nonlocal late_turn
+                    if message == interrupted and late_turn is None:
+                        late_turn = asyncio.create_task(old.scope.on_data({
+                            'type': 'turn.done',
+                            'turn': {'id': 'inflight', 'role': 'user', 'transcript': late_user},
+                        }))
+                        # The incoming transcript runs while the switch is sending to the sidecar.
+                        await asyncio.sleep(0)
+                    await send(message)
+
+                voice.send = send_with_inflight_transcript
+                request = asyncio.create_task(provider_request(client, url, 'gemini'))
+                try:
+                    await asyncio.wait_for(snapshot_started.wait(), 2)
+                    native_turn = 'native-during-snapshot'
+                    native_user = 'Buat catatan pengujian Cempaka.'
+                    signature = 'a' * 64
+                    await finish_turn(native_turn, 'user', native_user)
+                    # Hermes has persisted the native prompt while its submission receipt is still pending.
+                    jobs.history.extend(_visible_history([{
+                        'role': 'user', 'content': native_user, 'message_uid': 'native-row-id',
+                        'display_metadata': {'submission_id': f'wa-control-live:{voice.submission_id(native_turn)}:{signature}'},
+                    }], str.strip, include_message_refs=True))
+                    release_snapshot.set()
+                    _, candidate = await asyncio.wait_for(opened.get(), 2)
+                    await asyncio.wait_for(candidate.prepared.wait(), 2)
+                    append_context = candidate.append_context
+
+                    async def append_before_audio(text):
+                        assert not candidate.scope.active
+                        if late_user in text and not late_context_available:
+                            raise ConnectionError('Replacement did not accept the final transcript')
+                        return await append_context(text)
+
+                    candidate.append_context = append_before_audio
+                    during_user = 'Judul proyeknya Anggrek Sore.'
+                    during_reply = 'Aku ingat judul tersebut.'
+                    last_user = 'Untuk pengujian, pakai berkas contoh.'
+                    await finish_turn('during', 'user', during_user)
+                    await finish_turn('during-reply', 'assistant', during_reply)
+                    await finish_turn('last', 'user', last_user)
+                    assert candidate.input.empty() and not request.done()
+                finally:
+                    release_snapshot.set()
+                    release.set()
+                    result = await asyncio.wait_for(request, 2)
+
+                assert await ws.receive_json(timeout=2) == interrupted
+                assert late_turn is not None
+                await late_turn
+                assert app[STATE]['voice'] is voice and app[STATE]['active'] is socket
+                assert voice.hermes_session_id == SESSION and ADMISSION in voice.call_work
+                assert len(jobs.submissions) == 1
+
+                pcm = b'\x22\x01' * 20
+                if not late_context_available:
+                    assert result['status'] == 'failed'
+                    await asyncio.wait_for(candidate.closed.wait(), 2)
+                    status = await health(client, url)
+                    assert status['active_provider'] == {'provider': 'codex', 'account': 'default'}
+                    assert status['routing']['selected'] == 'codex'
+                    await send_pcm(ws, pcm)
+                    assert await asyncio.wait_for(old.input.get(), 2) == pcm
+                    return
+
+                assert result['status'] == 'switched'
+                startup = '\n'.join(item['text'] for item in candidate.initial_items)
+                assert earlier_user in startup and earlier_reply in startup
+                assert ADMISSION in startup
+                context = '\n'.join([startup, *candidate.context_updates])
+                assert signature not in context
+                for transcript in (earlier_user, earlier_reply, native_user, during_user, during_reply, last_user, late_user):
+                    assert context.count(transcript) == 1, transcript
+
+                await send_pcm(ws, pcm)
+                assert await asyncio.wait_for(candidate.input.get(), 2) == pcm
 
     asyncio.run(exercise())
 

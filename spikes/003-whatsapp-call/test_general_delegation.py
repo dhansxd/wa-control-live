@@ -16,6 +16,12 @@ ACTIVE_WHATSAPP_SESSION = 'active-whatsapp-dm'
 DM_ADMISSION_ID = 'a' * 32
 
 
+class TranscriptJobs:
+    async def save_exchange(self, session_id, _exchange, *, wait_for_lease=False):
+        assert session_id == ACTIVE_WHATSAPP_SESSION
+        return {'status': 'saved'}
+
+
 def delegation(text, *, item_id='request-1', turn_id='caller-1'):
     return {
         'type': 'delegation.created',
@@ -97,6 +103,111 @@ def test_interrupting_voice_clears_playback_and_preserves_the_hermes_task(tmp_pa
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize('reply_transcript', ['Judulnya Catatan Uji.', ''])
+def test_caller_speech_clears_queued_audio_after_provider_finishes_reply(tmp_path, monkeypatch, reply_transcript):
+    async def exercise():
+        submissions = []
+
+        class Jobs(TranscriptJobs):
+            async def submit(self, _submission_id, text, *, session_id):
+                submissions.append((session_id, text))
+                return {'status': 'started', 'receipt': {
+                    'session_id': session_id, 'admission_id': DM_ADMISSION_ID,
+                }}
+
+        voice, remote, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+
+        async def turn(kind, role, turn_id, transcript=''):
+            await voice.on_data({'type': kind, 'turn': {
+                'role': role, 'id': turn_id, 'transcript': transcript,
+            }})
+
+        try:
+            task = 'Susun catatan uji.'
+            _, status, admission_id = await voice.submit_task('task', 'task-request', task)
+            assert (status, admission_id) == ('started', DM_ADMISSION_ID)
+
+            await turn('turn.created', 'user', 'first-user')
+            assert sent == []
+            await turn('turn.done', 'user', 'first-user', 'Apa judul catatannya?')
+            await turn('turn.created', 'assistant', 'old-reply')
+            await feed_output(voice, remote, 1500)
+            await turn('turn.done', 'assistant', 'old-reply', reply_transcript)
+            if reply_transcript:
+                assert sent[-1] == {'serverContent': {
+                    'outputTranscription': {'text': reply_transcript}, 'turnComplete': True,
+                }}
+
+            # Generation is complete, but previously sent audio can still be in the sidecar queue.
+            voice.feed(struct.pack('<320h', *([1800] * 320)))
+            await turn('turn.created', 'user', 'new-user')
+            await turn('turn.created', 'user', 'new-user')
+            clear = {'serverContent': {'interrupted': True}}
+            assert sent[-1] == clear
+            assert sent.count(clear) == 1
+            assert any(bytes((await voice.connection.track.recv()).planes[0]))
+
+            late_interrupt = {'type': 'turn.interrupted', 'turn_id': 'old-reply'}
+            await voice.on_data(late_interrupt)
+            assert sent.count(clear) == 1
+            await feed_output(voice, remote, 1600)
+            assert sent[-1] == clear
+            await turn('turn.done', 'user', 'new-user', 'Bentar, aku mau tanya yang lain.')
+            assert sent[-1] == {'serverContent': {
+                'inputTranscription': {'text': 'Bentar, aku mau tanya yang lain.'}, 'turnComplete': True,
+            }}
+            await turn('turn.created', 'assistant', 'new-reply')
+            await voice.on_data(late_interrupt)
+            await feed_output(voice, remote, 1700)
+            assert sent.count(clear) == 1
+            assert audio_messages(sent) == [
+                adapter.audio_envelope(struct.pack('<480h', *([1500] * 480))),
+                adapter.audio_envelope(struct.pack('<480h', *([1700] * 480))),
+            ]
+            assert voice.call_work == {DM_ADMISSION_ID}
+            assert submissions == [(ACTIVE_WHATSAPP_SESSION, task)]
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('gap_before_caller', [True, False])
+def test_gap_does_not_mute_fresh_audio_before_the_assistant_turn_event(tmp_path, monkeypatch, gap_before_caller):
+    async def exercise():
+        voice, remote, sent, _ = local_voice(tmp_path, monkeypatch)
+        loop = asyncio.get_running_loop()
+        clock = loop.time
+        try:
+            await voice.on_data({'type': 'turn.created', 'turn': {'role': 'assistant', 'id': 'old-reply'}})
+            await feed_output(voice, remote, 1500)
+            await voice.on_data({'type': 'turn.done', 'turn': {
+                'role': 'assistant', 'id': 'old-reply', 'transcript': 'Jawaban pertama.',
+            }})
+
+            with monkeypatch.context() as advance:
+                if gap_before_caller:
+                    advance.setattr(loop, 'time', lambda: clock() + 10)
+                await voice.on_data({'type': 'turn.created', 'turn': {'role': 'user', 'id': 'new-user'}})
+                if not gap_before_caller:
+                    advance.setattr(loop, 'time', lambda: clock() + 10)
+                    await feed_output(voice, remote, 1600)
+                    assert len(audio_messages(sent)) == 1
+                await voice.on_data({'type': 'turn.done', 'turn': {
+                    'role': 'user', 'id': 'new-user', 'transcript': 'Ada kabar lain?',
+                }})
+                # The audio and turn events use different paths, so fresh PCM can lead the event.
+                await feed_output(voice, remote, 1700)
+                assert audio_messages(sent) == [
+                    adapter.audio_envelope(struct.pack('<h', 1500) * 480),
+                    adapter.audio_envelope(struct.pack('<h', 1700) * 480),
+                ]
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
 def test_route_cannot_submit_to_another_dm(tmp_path, monkeypatch):
     async def exercise():
         class Jobs:
@@ -106,6 +217,10 @@ def test_route_cannot_submit_to_another_dm(tmp_path, monkeypatch):
 
             async def submit(self, *_args, **_kwargs):
                 pytest.fail('A call cannot submit into a different WhatsApp session')
+
+            async def save_exchange(self, session_id, _exchange, *, wait_for_lease=False):
+                assert session_id == ACTIVE_WHATSAPP_SESSION
+                return {'status': 'session_changed'}
 
         voice, _, _, _ = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
         try:
@@ -304,7 +419,7 @@ def test_empty_proposal_requires_its_final_transcript(tmp_path, monkeypatch, fin
     async def exercise():
         routed = []
 
-        class Jobs:
+        class Jobs(TranscriptJobs):
             async def route(self, proposal, current, previous, loaded_context, *, session_id):
                 routed.append((proposal, current))
                 return {'status': 'reply'}
@@ -427,7 +542,7 @@ def test_explicit_history_read_uses_the_bound_dm_without_a_task(tmp_path, monkey
     async def exercise():
         searches = []
 
-        class Jobs:
+        class Jobs(TranscriptJobs):
             async def route(self, proposal, current, earlier, loaded_context, *, session_id):
                 assert proposal == current == spoken_request
                 assert earlier == previous
@@ -845,13 +960,8 @@ def test_new_caller_turn_during_preview_keeps_speech_and_the_callers_input(tmp_p
 
 def test_explicit_result_repeat_waits_for_preview_from_another_job(tmp_path, monkeypatch):
     async def exercise():
-        class Jobs:
-            pass
-
-        voice, _, _, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        voice, _, _, appended = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
         voice.connection.thread_id = 'call-thread'
-        voice.current_spoken_turn = 'caller-2'
-        voice.spoken_turn_final = True
         voice.offered_work_results.add(DM_ADMISSION_ID)
         speech = []
 
@@ -868,6 +978,9 @@ def test_explicit_result_repeat_waits_for_preview_from_another_job(tmp_path, mon
         voice.connection.server.call = speak
         monkeypatch.setattr(adapter, 'RESULT_SPEECH_QUIET_SECONDS', 0)
         try:
+            await voice.on_data({'type': 'turn.done', 'turn': {
+                'role': 'user', 'id': 'caller-2', 'transcript': 'Bacakan lagi hasilnya.',
+            }})
             await voice.send_work_speech('Progres pekerjaan lain.', preview=True)
             repeat = voice.spawn(voice.present_work_result(
                 'repeat-1', 'caller-2', DM_ADMISSION_ID, 'Hasil yang ingin diulang.', repeat=True,
@@ -1424,7 +1537,7 @@ def test_task_proposal_corrected_to_a_question_does_not_submit(tmp_path, monkeyp
         fragment = 'Buat laporan'
         corrected = 'Buat laporan yang kemarin perlu judul apa, sudah ada di chat?'
 
-        class Jobs:
+        class Jobs(TranscriptJobs):
             async def route(self, _proposal, current, _previous, _loaded_context, *, session_id):
                 routed.append(current)
                 return {'status': 'task' if current == fragment else 'reply'}
@@ -1453,7 +1566,8 @@ def test_task_proposal_corrected_to_a_question_does_not_submit(tmp_path, monkeyp
     asyncio.run(exercise())
 
 
-def test_call_close_saves_completed_exchange_but_not_unanswered_speech(tmp_path, monkeypatch):
+@pytest.mark.parametrize('final_received', [True, False])
+def test_call_close_preserves_only_final_owner_speech(tmp_path, monkeypatch, final_received):
     async def exercise():
         saved = []
 
@@ -1471,10 +1585,16 @@ def test_call_close_saves_completed_exchange_but_not_unanswered_speech(tmp_path,
             await turn('turn.done', 'user', 'user-1', 'Judul cerita kita Laut Biru.')
             await turn('turn.created', 'assistant', 'reply-1', '')
             await turn('turn.done', 'assistant', 'reply-1', 'Baik, aku ingat judulnya.')
-            await turn('turn.done', 'user', 'user-2', 'Ucapan ini belum dijawab.')
+            await turn('turn.created', 'user', 'user-2', 'Nama proyeknya')
+            if final_received:
+                await turn('turn.done', 'user', 'user-2', 'Nama proyeknya Anggrek Sore.')
+                await turn('turn.done', 'user', 'user-2', 'Nama proyeknya Anggrek Sore.')
         finally:
             await voice.close()
-        assert len(saved) == 1
+        await voice.close()
+
+        expected_count = 2 if final_received else 1
+        assert len(saved) == expected_count
         session_id, exchange = saved[0]
         assert session_id == ACTIVE_WHATSAPP_SESSION
         assert 0 < exchange.pop('user_at_ms') <= exchange.pop('assistant_at_ms')
@@ -1482,7 +1602,15 @@ def test_call_close_saves_completed_exchange_but_not_unanswered_speech(tmp_path,
             'exchange_id': uuid.uuid5(uuid.NAMESPACE_URL, f'wa-control-live:{tmp_path.name}:exchange:user-1').hex,
             'user': 'Judul cerita kita Laut Biru.', 'assistant': 'Baik, aku ingat judulnya.',
         }
-        assert voice.report['voice_exchanges_saved'] == 1
+        if final_received:
+            session_id, exchange = saved[1]
+            assert session_id == ACTIVE_WHATSAPP_SESSION
+            assert exchange.pop('user_at_ms') > 0
+            assert exchange == {
+                'exchange_id': uuid.uuid5(uuid.NAMESPACE_URL, f'wa-control-live:{tmp_path.name}:exchange:user-2').hex,
+                'user': 'Nama proyeknya Anggrek Sore.', 'assistant': '',
+            }
+        assert voice.report['voice_exchanges_saved'] == expected_count
 
     asyncio.run(exercise())
 
@@ -1563,13 +1691,17 @@ def test_voice_reply_is_saved_with_its_user_turn_when_transcript_output_waits(tm
     asyncio.run(exercise())
 
 
-def test_native_task_reply_is_not_written_as_a_second_chat_exchange(tmp_path, monkeypatch):
+@pytest.mark.parametrize('spoken_reply', [True, False])
+def test_call_close_does_not_write_a_second_exchange_for_a_native_task(tmp_path, monkeypatch, spoken_reply):
     async def exercise():
+        submitted = []
+
         class Jobs:
             async def route(self, *_args, session_id):
                 return {'status': 'task'}
 
-            async def submit(self, _submission_id, _text, *, session_id):
+            async def submit(self, _submission_id, text, *, session_id):
+                submitted.append((session_id, text))
                 return {'status': 'completed', 'output': 'Catatan sudah selesai.',
                         'receipt': {'session_id': session_id, 'admission_id': 'native-task'}}
 
@@ -1586,12 +1718,14 @@ def test_native_task_reply_is_not_written_as_a_second_chat_exchange(tmp_path, mo
             await acknowledge(voice, 'request-1')
             await wait_until(lambda: len(appended) == 2)
             await acknowledge(voice, 'request-1')
-            for kind in ('turn.created', 'turn.done'):
-                await voice.on_data({'type': kind, 'turn': {
-                    'role': 'assistant', 'id': 'task-reply', 'transcript': 'Catatan sudah selesai.',
-                }})
+            if spoken_reply:
+                for kind in ('turn.created', 'turn.done'):
+                    await voice.on_data({'type': kind, 'turn': {
+                        'role': 'assistant', 'id': 'task-reply', 'transcript': 'Catatan sudah selesai.',
+                    }})
         finally:
             await voice.close()
+        assert submitted == [(ACTIVE_WHATSAPP_SESSION, 'Buat catatan.')]
         assert not voice.report.get('voice_exchanges_saved')
 
     asyncio.run(exercise())

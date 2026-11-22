@@ -58,7 +58,7 @@ def profile_sidecar_checksums(private, unified_gateway, sidecar_sha256=None):
 
 
 def prepare_profile(*, owner, bot, private, binary, python, hermes_home=None, unified_gateway=False,
-                    sidecar_sha256=None):
+                    sidecar_sha256=None, hermes_runtime=None):
     """Prepare explicit profile-owned state for the pinned sidecar and its adapter."""
     binary = Path(binary).expanduser().absolute()
     # Retain the virtualenv entry point when it is a symlink to a base interpreter.
@@ -74,11 +74,12 @@ def prepare_profile(*, owner, bot, private, binary, python, hermes_home=None, un
     allowed_sha256 = profile_sidecar_checksums(private, unified_gateway, sidecar_sha256)
     return _prepare_state(STAGE, owner=owner, bot=bot, private=private,
                           binary=binary, python=python, allowed_sha256=allowed_sha256,
-                          hermes_home=hermes_home, unified_gateway=unified_gateway)
+                          hermes_home=hermes_home, unified_gateway=unified_gateway,
+                          hermes_runtime=hermes_runtime)
 
 
 def _prepare_state(stage, *, owner, bot, private, binary, python, allowed_sha256, hermes_home=None,
-                   unified_gateway=False):
+                   unified_gateway=False, hermes_runtime=None):
     binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
     if binary_sha256 not in allowed_sha256:
         raise ValueError('Sidecar release checksum mismatch; do not execute')
@@ -92,6 +93,8 @@ def _prepare_state(stage, *, owner, bot, private, binary, python, allowed_sha256
               'python':str(python)}
     if hermes_home is not None:
         config['hermes_home'] = str(hermes_home)
+    if hermes_runtime is not None:
+        config['hermes_runtime'] = str(Path(hermes_runtime).resolve())
     if unified_gateway:
         config['unified_gateway'] = True
     with owned_transport(config):
@@ -419,6 +422,23 @@ def terminate_owned(process):
         raise RuntimeError('Owned voice child required SIGKILL; cleanup is unverified')
 
 
+def _adapter_command(config, stage):
+    script = stage / 'call_adapter.py'
+    if not (hermes_runtime := config.get('hermes_runtime')):
+        return [config['python'], str(script)]
+    # Hermes bootstraps its managed package generation in the child interpreter.
+    bootstrap = (
+        'import pathlib, runpy, sys; '
+        'sys.path.insert(0, sys.argv.pop(1)); '
+        'script = pathlib.Path(sys.argv.pop(1)); '
+        'sys.argv[0] = str(script); '
+        'import hermes_bootstrap; '
+        'sys.path.insert(0, str(script.parent)); '
+        'runpy.run_path(str(script), run_name="__main__")'
+    )
+    return [config['python'], '-I', '-B', '-c', bootstrap, hermes_runtime, str(script)]
+
+
 def serve(config, *, is_active=None, agent_jobs=False, control_command=None, live_settings=None, live_enabled=True):
     private, stage = Path(config['private']), Path(config['stage'])
     adapter = sidecar = control = None
@@ -463,10 +483,12 @@ def serve(config, *, is_active=None, agent_jobs=False, control_command=None, liv
             env = dict(os.environ)
             for key in ('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV', '__PYVENV_LAUNCHER__'):
                 env.pop(key, None)
-            command = [config['python'],str(stage/'call_adapter.py'),
-                       '--token-file',str(private/'adapter.token'),'--runs',str(private/'runs')]
+            command = _adapter_command(config, stage)
+            command.extend(['--token-file',str(private/'adapter.token'),'--runs',str(private/'runs')])
             if 'hermes_home' in config:
                 command.extend(['--task-hermes-home', config['hermes_home']])
+                if config.get('hermes_runtime'):
+                    env['HERMES_HOME'] = config['hermes_home']
             if live_settings is not None:
                 write_live_settings(private, live_settings)
                 command.extend(['--live-config', str(private/'live-config.json')])

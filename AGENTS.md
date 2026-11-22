@@ -3,22 +3,33 @@
 Baca [handoff](HANDOFF.md) saat memulai dari clone atau sesi baru.
 Baca [PRD dan checklist](PLAN.md) untuk ruang lingkup dan perilaku yang diminta.
 Cocokkan dengan [status kandidat](STATUS.md), kode yang ada, pengujian, dan
-riwayat Git yang tersedia sebelum menentukan pekerjaan berikutnya. Implementasi
-lanjutan sedang dijeda. Lanjutkan perubahan sesuai tugas yang diminta.
+riwayat Git yang tersedia sebelum menentukan pekerjaan berikutnya. Lanjutkan
+perubahan sesuai tugas yang diminta. Jika aturan lama bertentangan dengan
+arahan terbaru pemilik, perbarui aturan dan kriteria penerimaannya.
 
 ## Arah produk
 
-- Pertahankan WhatsApp Control yang sudah ada sebagai dasar satu plugin
-  komunitas. Gabungkan Live ke dalamnya dan jaga kemampuan Control untuk
-  akun bot dan akun tambahan.
+- Pertahankan dua kemampuan dalam satu plugin komunitas. WhatsApp Control
+  memberi agen Hermes akses ke akun yang ditautkan untuk membaca percakapan,
+  membalas atau mengirim pesan dan media, mengelola grup, serta memublikasikan
+  Status sesuai izin akun dan permintaan pemilik. WhatsApp Live memungkinkan
+  pemilik menelepon Hermes di nomor bot. Chatbot tamu tetap opsional dan
+  terpisah dari kendali pemilik.
 - Satu penautan akun bot Hermes melayani Control, DM pemilik, dan telepon.
-  Hanya akun bot memakai Live. Akun Control tambahan ditautkan sesuai pilihan
-  pengguna. Dua akun atau lima belas key dalam contoh adalah skenario uji,
-  sehingga angka contoh tidak menjadi batas produk.
+  Deteksi identitas bot dari pairing WhatsApp Hermes yang ada dan cocokkan
+  dengan hasil scan Live. Ambil identitas akun Control tambahan dari scan
+  QR. Tolak akun bot pada QR Control tambahan. Izin menelepon dan DM pemilik
+  dipilih secara terpisah dari identitas akun Control yang ditautkan.
+  Dua akun atau lima belas key dalam contoh adalah skenario uji, sehingga
+  angka contoh tidak menjadi batas produk.
 - Pakai percakapan WhatsApp Hermes yang sedang aktif untuk DM, audio,
-  lampiran, transkrip, dan pekerjaan. Target perilaku pemilik adalah Voice di
-  ChatGPT Desktop. Panggilan dari sesi baru, sesi yang dilanjutkan, dan perubahan
-  sesi saat telepon mengikuti sesi aktif yang sama.
+  lampiran, transkrip, dan pekerjaan. Cocokkan [perilaku yang bisa dialami
+  pemilik di ChatGPT Live Desktop](PLAN.md#acuan-perilaku-telepon) dalam
+  skenario penerimaan. Pemilik bisa mengobrol santai saat Hermes bekerja,
+  menyela jawaban suara, dan mengakhiri telepon lewat percakapan. Interupsi
+  suara dan penutupan telepon membiarkan pekerjaan yang sudah diterima tetap
+  berjalan. Perubahan atau pembatalan tugas mengikuti maksud pemilik dan
+  kontrol asli Hermes. Penutupan oleh asisten adalah syarat pemilik.
 - Pakai satu alur percakapan Live. Pemilihan provider, model, akun atau key,
   serta pool menentukan koneksi audio. Pergantian audio tetap mengikuti
   percakapan dan pekerjaan Hermes yang sedang berjalan.
@@ -27,8 +38,10 @@ lanjutan sedang dijeda. Lanjutkan perubahan sesuai tugas yang diminta.
   atau konteks pribadi pemilik. Handoff mengikuti maksud pengirim dalam bahasa
   natural dan durasinya bisa diatur.
 - Utamakan pengaturan harian melalui permintaan natural ke Hermes atau slash
-  command yang relevan. Setup awal dan penautan dari terminal dapat dipakai
-  pada profil Hermes baru dengan kredensial dan provider pilihan pengguna.
+  command yang relevan. Setelah instalasi GitHub dan persetujuan dependensi
+  asli Hermes, pengguna langsung menjalankan perintah pairing plugin.
+  Kemas runtime platform yang didukung dalam plugin dan gunakan lifecycle
+  asli Hermes untuk menjalankan gateway dan mengelola plugin.
 - Ikuti lifecycle asli Hermes dan pakai API publik jika tersedia. Untuk
   integrasi sesi yang membutuhkan API internal, batasi pemakaiannya pada
   bagian tersebut, dokumentasikan, dan uji pada versi Hermes yang didukung.
@@ -49,7 +62,10 @@ lanjutan sedang dijeda. Lanjutkan perubahan sesuai tugas yang diminta.
    yang dapat dibuat ulang.
 4. Perbarui PRD dan status setelah setiap perubahan. Catat perilaku yang
    berubah, revisi yang diuji, hasil tes, serta pekerjaan tersisa. Klaim verifikasi
-   mengikuti bukti dari pengujian kode, simulasi, atau pemakaian nyata.
+   mengikuti bukti dari pengujian kode, simulasi, atau pemakaian nyata. Untuk
+   mengklaim kesetaraan telepon, bandingkan skenario yang sama di ChatGPT Live
+   Desktop dan WhatsApp. Tandai detail yang belum terdokumentasi atau diamati
+   sebelum menjadikannya aturan.
 5. Publikasikan sumber, dokumentasi, tes sintetis, dan atribusi. Simpan
    kredensial, data pairing, nomor nyata, rekaman pribadi, dan profil Hermes
    di luar repo publik.

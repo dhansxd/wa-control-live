@@ -107,3 +107,29 @@ def test_disabled_hermes_whatsapp_cannot_enable_voice(identity, monkeypatch, tmp
     install_hermes_config(monkeypatch, tmp_path, enabled=enabled, dm_policy=dm_policy)
     with pytest.raises(RuntimeError, match=error):
         identity.resolve_identity(tmp_path)
+
+
+def test_setup_detects_bot_without_dm_allowlist(identity, monkeypatch, tmp_path):
+    paired_session(tmp_path)
+    install_hermes_config(monkeypatch, tmp_path, env_owner='', dm_policy='disabled')
+    assert identity.resolve_setup_identity(tmp_path) == (BOT, None)
+
+
+def test_home_dm_is_a_candidate_when_stock_allowlist_is_empty(identity, monkeypatch, tmp_path):
+    paired_session(tmp_path)
+    install_hermes_config(monkeypatch, tmp_path, env_owner='')
+    monkeypatch.setattr(identity, '_whatsapp_platform', lambda _home: SimpleNamespace(
+        extra={}, home_channel=SimpleNamespace(chat_id=f'{OWNER}@s.whatsapp.net'),
+    ))
+    assert identity.resolve_setup_identity(tmp_path) == (BOT, OWNER)
+
+
+def test_no_local_stock_pairing_is_distinguished_from_unreadable_identity(identity, monkeypatch, tmp_path):
+    install_hermes_config(monkeypatch, tmp_path)
+    with pytest.raises(identity.StockBotNotPaired):
+        identity.resolve_setup_identity(tmp_path)
+    session = paired_session(tmp_path)
+    (session / 'creds.json').write_text('{malformed')
+    with pytest.raises(RuntimeError, match='no readable paired chat identity') as error:
+        identity.resolve_setup_identity(tmp_path)
+    assert not isinstance(error.value, identity.StockBotNotPaired)

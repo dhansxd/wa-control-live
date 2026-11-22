@@ -1,9 +1,10 @@
-"""Gateway adapter for the WhatsApp account already owned by the Rust sidecar."""
+"""Gateway adapter for the unified WhatsApp bot transport."""
 
 import asyncio
 from hmac import compare_digest
 import logging
 import re
+import subprocess
 from uuid import uuid4
 
 import aiohttp
@@ -25,6 +26,8 @@ _CURSOR_CONFLICT = 409
 _CREATE_VOICE_SESSION = "voice.create_session"
 _VOICE_ROUTING = "voice.routing"
 _IMAGE_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+_TRANSPORT_RETRY_SECONDS = 5
+_TRANSPORT_STOP_SECONDS = 4
 logger = logging.getLogger(__name__)
 
 
@@ -55,7 +58,7 @@ def _phone(value):
 
 
 class WhatsAppLiveAdapter(BasePlatformAdapter):
-    def __init__(self, config, owner, bot, token_path, *, endpoint=SIDECAR):
+    def __init__(self, config, owner, bot, token_path, *, endpoint=SIDECAR, transport_command=None):
         super().__init__(config, Platform.WHATSAPP)
         self.owner = owner
         self.bot = bot
@@ -69,6 +72,10 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
         # Hermes transfers native dedup caches when replacing an adapter.
         self.seen = MessageDeduplicator(max_size=512, ttl_seconds=float("inf"))
         self.owner_lid = None
+        self.transport_command = transport_command
+        self._transport = None
+        self._transport_paused = False
+        self._next_transport_start = 0.0
 
     @property
     def send_path_degraded(self):
@@ -101,8 +108,51 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
         if self.http is not None:
             await self.http.close()
             self.http = None
+        await self._stop_transport()
         self.verified = False
         self._mark_disconnected()
+
+    def _ensure_transport(self):
+        if (self.transport_command is None or self._transport_paused
+                or not self.token_path.with_name("paired.json").is_file()):
+            return
+        if self._transport is not None:
+            code = self._transport.poll()
+            if code is None:
+                return
+            self._transport = None
+            if code == 0:
+                # An explicit cleanup or disable exited the service normally.
+                self._transport_paused = True
+                return
+            logger.warning("The gateway-owned WhatsApp transport exited with code %s.", code)
+        now = asyncio.get_running_loop().time()
+        if now < self._next_transport_start:
+            return
+        self._next_transport_start = now + _TRANSPORT_RETRY_SECONDS
+        try:
+            argv, env = self.transport_command()
+            # Record the child before yielding, so disconnect cannot race a spawn.
+            self._transport = subprocess.Popen(
+                argv, env=env, stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except (OSError, RuntimeError, ValueError):
+            logger.warning("Could not start the WhatsApp transport for this gateway.", exc_info=True)
+
+    async def _stop_transport(self):
+        process, self._transport = self._transport, None
+        self._transport_paused = False
+        self._next_transport_start = 0.0
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            await asyncio.to_thread(process.wait, timeout=_TRANSPORT_STOP_SECONDS)
+        except ProcessLookupError:
+            pass
+        except subprocess.TimeoutExpired:
+            # The native serve command is responsible for stopping its own children.
+            logger.warning("The gateway-owned WhatsApp transport is still shutting down.")
 
     async def _receive(self):
         while True:
@@ -111,6 +161,9 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
                     async with self.http.get("/health", allow_redirects=False) as response:
                         response.raise_for_status()
                         health = await response.json()
+                    if self._transport is None or self._transport.poll() is not None:
+                        # An already-running foreground transport owns this profile.
+                        self._transport_paused = True
                     if (health.get("logged_in") is not True or health.get("bot") != self.bot
                             or health.get("owner") != self.owner):
                         await asyncio.sleep(1)
@@ -133,10 +186,12 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
                 for message in messages:
                     await self._receive_message(message)
                 self.cursor = cursor
-            except (aiohttp.ClientError, OSError, ValueError, AttributeError, RuntimeError):
+            except (aiohttp.ClientError, OSError, ValueError, AttributeError, RuntimeError) as error:
                 if self.verified:
                     self.verified = False
                     self._mark_degraded()
+                if isinstance(error, aiohttp.ClientConnectorError):
+                    self._ensure_transport()
                 await asyncio.sleep(1)
 
     async def _receive_message(self, message):
@@ -297,7 +352,7 @@ def voice_routing_reader(ctx):
     return _voice_gateway_request(ctx, _VOICE_ROUTING)
 
 
-def register_gateway(ctx, owner, bot):
+def register_gateway(ctx, owner, bot, *, transport_command=None):
     from hermes_constants import get_hermes_home
     if __package__:
         from .whatsapp_reconnect import register_whatsapp_platform
@@ -319,7 +374,7 @@ def register_gateway(ctx, owner, bot):
         return {"control_home": str(store._routing_home.resolve()), "scope": store._routing_scope()}
 
     def adapter_factory(config):
-        return WhatsAppLiveAdapter(config, owner, bot, token_path)
+        return WhatsAppLiveAdapter(config, owner, bot, token_path, transport_command=transport_command)
 
     register_whatsapp_platform(ctx, adapter_factory, token_path)
     ctx.register_rpc(_CREATE_VOICE_SESSION, create)

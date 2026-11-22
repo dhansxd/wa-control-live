@@ -1,4 +1,5 @@
 import fcntl
+from io import StringIO
 import importlib.util
 import json
 from pathlib import Path
@@ -146,3 +147,40 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(self.show.call_args.args[0], {
             "running": False, "default_account": "shop", "accounts": {"shop": {"status": "offline"}},
         })
+
+    def test_unified_control_pair_explains_which_phone_to_scan_before_showing_qr(self):
+        home = self.root.parent / "profiles" / "cobalt"
+        constants = SimpleNamespace(get_hermes_home=lambda: home)
+        result = {"account": "personal"}
+
+        def pair(root, action, args, on_event):
+            self.assertEqual((root, action, args), (cli.runtime_path(home), "pair", result))
+            on_event({"terminal": "fake QR code"})
+            return result
+
+        with patch.dict(sys.modules, {"hermes_constants": constants}), \
+                patch.object(cli, "invoke", side_effect=pair), \
+                patch.object(sys, "stdout", new_callable=StringIO) as output, \
+                patch.object(output, "isatty", return_value=True):
+            cli.run(None, "", SimpleNamespace(action="pair", account="personal"), bot_runtime=self.root)
+        self.assertEqual(output.getvalue().splitlines(), [
+            "Scan this QR code from the additional Control account 'personal'.",
+            "On that phone, open WhatsApp > Linked devices > Link a device.",
+            "fake QR code",
+        ])
+        self.show.assert_called_once_with(result)
+
+    def test_pair_or_repair_with_stopped_service_guides_the_same_profile(self):
+        home = self.root.parent / "profiles" / "cobalt"
+        constants = SimpleNamespace(get_hermes_home=lambda: home)
+        for action, bot_runtime, command in [
+            ("pair", self.root, "wa-control-live"),
+            ("repair", None, "whatsapp-control"),
+        ]:
+            with self.subTest(action=action), patch.dict(sys.modules, {"hermes_constants": constants}), \
+                    patch.object(cli, "invoke", side_effect=cli.ServiceStopped("offline")), \
+                    patch.object(sys.stdout, "isatty", return_value=True), \
+                    patch.object(sys, "stderr", new_callable=StringIO) as output, \
+                    self.assertRaises(SystemExit):
+                cli.run(None, "", SimpleNamespace(action=action, account="personal"), bot_runtime=bot_runtime)
+            self.assertIn(f"`hermes -p cobalt {command} serve`", output.getvalue())

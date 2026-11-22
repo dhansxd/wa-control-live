@@ -32,9 +32,13 @@ def test_delegation_waits_for_late_final_of_the_exact_user_turn(tmp_path, monkey
             prelim.set()
             return True
 
+        async def save_exchange(session_id, exchange):
+            assert session_id == 'session-a' and not exchange['assistant']
+            return {'status': 'saved'}
+
         monkeypatch.setattr(adapter, 'POST_ACK_TRANSCRIPT_WAIT', 0)
         routed_event = asyncio.Event()
-        voice = voice_fixture(tmp_path, monkeypatch, SimpleNamespace(route=route))
+        voice = voice_fixture(tmp_path, monkeypatch, SimpleNamespace(route=route, save_exchange=save_exchange))
         voice.append_handoff = append
         item = {'type': 'delegation.created', 'item': {'id': 'proposal', 'target': 'client',
                 'user_bidi_turn_id': 'owner', 'content': [{'text': 'Kalimat terpotong.'}]}}

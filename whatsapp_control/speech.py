@@ -29,14 +29,14 @@ def _install_paths(entry):
     return Path(hermes_constants.__file__).resolve(), Path(entry).resolve()
 
 
-def _command(host, home, action="_speech"):
+def _command(host, home, action="_speech", *, cli="whatsapp-control"):
     # Boot the documented Python CLI with the already-running interpreter and
     # the running installation on its import path, including managed installs.
     # An explicit default selects the supplied root despite sticky active_profile.
     profile = [] if home.parent.name == "profiles" else ["-p", "default"]
     bootstrap = ('import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); '
                  'runpy.run_module("hermes_cli.main", run_name="__main__", alter_sys=True)')
-    return [sys.executable, "-I", "-B", "-c", bootstrap, str(host.parent), *profile, "whatsapp-control", action]
+    return [sys.executable, "-I", "-B", "-c", bootstrap, str(host.parent), *profile, cli, action]
 
 
 def _read_response(path):

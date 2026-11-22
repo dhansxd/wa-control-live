@@ -20,10 +20,10 @@ Contoh permintaan dari root repo:
 2. Jalankan `git status --short --branch` dan `git log -5 --oneline`. Cocokkan
    kode serta tes yang relevan dengan checklist, terutama jika `main` sudah
    berubah. Gunakan implementasi yang tersedia dan perbaiki celah yang terbukti.
-3. Implementasi lanjutan dijeda saat handoff ini ditulis. Mulai perubahan
-   setelah ada permintaan melanjutkan. Pertahankan Control multiakun, Live
-   khusus akun bot, dan satu percakapan WhatsApp Hermes yang aktif untuk DM,
-   telepon, lampiran, transkrip, serta pekerjaan.
+3. Pertahankan Control multiakun, Live khusus akun bot, dan satu percakapan
+   WhatsApp Hermes yang aktif untuk DM, telepon, lampiran, transkrip, serta
+   pekerjaan. Gunakan [skenario ChatGPT Live Desktop](PLAN.md#acuan-perilaku-telepon)
+   sebagai acuan penerimaan telepon.
 
 ## Baseline yang terakhir diuji
 
@@ -33,29 +33,32 @@ Contoh permintaan dari root repo:
   Baileys lulus. Regresi Python dan Baileys dijalankan ulang pada snapshot
   publik. Rincian hasil dan batas verifikasi tercatat di [STATUS.md](STATUS.md#hasil-verifikasi).
 - Instalasi publik, registrasi perintah setup, disable, enable, dan remove
-  diverifikasi di profil Hermes v0.23.1 sementara. Build sidecar release dari
-  clone bersih, wizard lengkap dengan perangkat tertaut, dan panggilan dengan
-  provider nyata masih perlu diuji pada kandidat rilis.
+  diverifikasi di profil Hermes v0.23.1 sementara. Kandidat berikutnya
+  berhasil membangun sidecar release arm64 dan menjalankan regresi
+  terhadap Hermes v0.23.2. Wizard mendeteksi bot yang sudah dipairing di
+  Hermes dan QR Control menolak nomor bot. Scan perangkat nyata dan
+  panggilan dengan provider nyata masih perlu diuji.
+- Paket kandidat membawa sidecar macOS arm64. Uji instalasi native Hermes
+  memakai snapshot Git lokal dengan dependensi dari prompt Hermes. Alur mulai
+  dari `wa-control-live pair`. Gateway Hermes memiliki transport setelah
+  perangkat tertaut. Lihat [status](STATUS.md#hasil-verifikasi) untuk hasil uji.
 - Tiga perbaikan yang sudah memiliki regresi lokal adalah kelanjutan akun
   sehat saat lookup semua kontak gagal di akun lain, deduplikasi DM saat
   provider berpindah, dan satu klip lokal saat pemulihan audio berlangsung lama.
 
 ## Langkah pertama yang siap dilanjutkan
 
-Tampilkan **alasan dan waktu retry per alias akun di `/walive status`**.
-Pada snapshot ini, [pool Live](live_routing.py) sudah menyediakan data akun
-di `routing.accounts`. [Formatter perintah](live_commands.py) baru menampilkan
-ringkasan keseluruhan. Cek keduanya lagi sebelum mengubahnya.
+Uji **jeda interupsi pada panggilan nyata**. Regresi lokal [adapter](spikes/003-whatsapp-call/call_adapter.py)
+sudah memeriksa pengosongan antrean setelah provider mengirim transkrip final,
+kelanjutan input pemilik, dan tugas Hermes dengan ID yang sama. Gunakan
+akun serta perangkat uji tertaut untuk mencatat waktu mulai suara pemilik dan
+akhir suara lama yang terdengar. Bandingkan skenario yang sama di Desktop.
+Periksa juga penutupan oleh asisten dan obrolan sambil kerja.
 
-- Gunakan alasan yang sudah dinormalisasi, alias yang aman ditampilkan, dan
-  waktu retry jika tersedia. Pertahankan status panggilan dan bukti pengiriman
-  notifikasi yang sudah ditampilkan.
-- Tambahkan kasus lokal di [tes perintah Live](test_live_commands.py). Uji
-  beberapa alias dengan penyebab berbeda, waktu retry yang tersedia, dan
-  ketiadaan secret atau detail error mentah pada balasan.
-- Catat hasil di PRD dan status. Jika langkah ini sudah selesai di commit
-  yang lebih baru, pilih celah berikutnya dari status setelah memeriksa kode
-  dan bukti yang ada.
+Alasan dan waktu retry per alias pada `/walive status` tetap tercatat sebagai
+pekerjaan diagnostik. Data akun tersedia di `routing.accounts` pada
+[pool Live](live_routing.py). Cek kondisi [formatter](live_commands.py) dan
+[tes perintah](test_live_commands.py) ketika pekerjaan itu diambil.
 
 Retry DM setelah WhatsApp pulih tercatat sebagai usulan. Resumption provider
 lewat handle Gemini atau fork GPT-Live adalah opsi teknis terbuka. Pertahankan

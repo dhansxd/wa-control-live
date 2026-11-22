@@ -54,6 +54,7 @@ COMMENTARY_PRIVATE = re.compile(
 )
 TOOL_EVENT_ID = re.compile(r'[A-Za-z0-9_.:-]{1,256}')
 VOICE_CONTEXT_LIMIT = 6000
+VOICE_SUBMISSION_REFERENCE = re.compile(r'wa-control-live:([0-9a-f]{32}):[0-9a-f]{64}')
 MIME_TYPE = re.compile(r'[a-z0-9][a-z0-9!#$&^_.+\-]*/[a-z0-9][a-z0-9!#$&^_.+\-]*')
 BRIDGE_DOCUMENT_NAME = re.compile(r'doc_[0-9a-f]{12}_(.+)')
 PHOTO_DESCRIPTION = re.compile(
@@ -719,7 +720,14 @@ def _visible_history(rows, clean_text, *, include_message_refs=False):
                 refs = [uid, *(row.get('_absorbed_message_uids') or ())] if uid else [
                     row.get('_row_id', row.get('id')), *(row.get('_absorbed_row_ids') or ()),
                 ]
-                if refs := [ref for ref in refs if ref]:
+                refs = [ref for ref in refs if ref]
+                metadata = row.get('display_metadata')
+                if role == 'user' and isinstance(metadata, dict):
+                    submission = metadata.get('submission_id')
+                    if isinstance(submission, str) and (match := VOICE_SUBMISSION_REFERENCE.fullmatch(submission)):
+                        # The unsigned ID links this native task to its spoken turn.
+                        refs.append(f'wa-voice-submission:{match[1]}')
+                if refs:
                     message['_message_refs'] = refs
             yield message
 

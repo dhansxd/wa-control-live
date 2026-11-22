@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 
 from .settings import PLUGIN, private_dir
@@ -67,6 +68,18 @@ def encode_frame(payload):
     return frame
 
 
+def node_executable():
+    try:
+        from pm import env_for
+    except ImportError:
+        node = shutil.which("node")
+    else:
+        node = shutil.which("node", path=env_for("node").get("PATH", ""))
+    if node is None:
+        raise RuntimeError("Node.js is unavailable. Accept the Node dependency prompt when installing this plugin in Hermes.")
+    return node
+
+
 async def request_worker(root, action, args=None, on_event=None):
     directory = socket_dir(root)
     if directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid != os.getuid():
@@ -113,7 +126,7 @@ class Bridge:
         private_dir(self.root / "bridge")
         env = {key: os.environ[key] for key in ("PATH", "TMPDIR", "LANG", "LC_ALL") if key in os.environ}
         self.process = await asyncio.create_subprocess_exec(
-            "node", str(source / "bridge.mjs"), str(self.root / "bridge"),
+            node_executable(), str(source / "bridge.mjs"), str(self.root / "bridge"),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env, limit=MAX_FRAME,
         )

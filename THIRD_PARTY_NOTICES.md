@@ -4,6 +4,7 @@
 - Sidecar [Hermes WhatsApp Voice](https://github.com/ashwanthbalakrishnan5/hermes-whatsapp-voice/tree/ef3b8be4a79651b6c11a720f20a95b9e2939c92e) dan fixture WAV berasal dari revisi `ef3b8be4a79651b6c11a720f20a95b9e2939c92e`. [Lisensi MIT sidecar](spikes/003-whatsapp-call/source/hermes-wa-voice-opus-media-1/LICENSE)
 - Alur delegasi mengadaptasi [Hermes Live Voice oleh Synero](https://github.com/Synero/hermes-live-voice/tree/0578e0cc35022a9dcb469cb9fbfc4d8afc93fc65). Skrip persiapan menerapkan patch lokal pada [WhatsApp Rust](https://github.com/oxidezap/whatsapp-rust/tree/9b9fdb7e5c4211cdc7c837abb6a9ae9c597e35c5). Pemberitahuan MIT untuk keduanya tercantum di bawah.
 - Klip pemberitahuan dibuat dari kalimat asli menggunakan eSpeak NG dan FFmpeg. [Format dan perintah reproduksi klip](spikes/003-whatsapp-call/assets/README.md)
+- Sidecar macOS arm64 menyertakan dependensi sesuai Cargo.lock. [Lisensi dependensi sidecar](sidecar/darwin-arm64/THIRD_PARTY_LICENSES.txt) · [Atribusi pustaka standar Rust](sidecar/darwin-arm64/RUST-STANDARD-LIBRARY-COPYRIGHT.html)
 
 ## MIT License
 

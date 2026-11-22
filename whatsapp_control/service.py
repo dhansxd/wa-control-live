@@ -196,6 +196,8 @@ class Service:
             return await self.rust.call(op, args or {})
         if settings.get("_transport") == "rust":
             raise BridgeError("This account's unified WhatsApp transport is unavailable.", "unavailable")
+        if self.rust is not None and op in {"pair", "repair"}:
+            args = {**(args or {}), "reserved_bot_number": self.rust.bot}
         return await self.bridge.call(op, account, args)
 
     def identities(self, account):

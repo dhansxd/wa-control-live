@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 
 
@@ -30,6 +31,12 @@ def account_id(value):
     if not isinstance(value, str) or not ACCOUNT.fullmatch(value):
         raise ValueError("Use a lowercase account label containing letters, digits, hyphens, or underscores.")
     return value
+
+
+def hermes_command(home, *args):
+    home = Path(home)
+    profile = home.name if home.parent.name == "profiles" else "default"
+    return shlex.join(("hermes", "-p", profile, *args))
 
 
 def private_dir(root):

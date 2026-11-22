@@ -129,9 +129,14 @@ def test_hangup_waits_for_spoken_farewell_and_can_be_cancelled(tmp_path, monkeyp
 
             if interruption == 'after_farewell':
                 await voice.on_data(turn('user', 'caller-2', phase='created'))
-                assert sent[-1] == {'serverContent': {'interrupted': True}}
+                clear = {'serverContent': {'interrupted': True}}
+                assert sent[-1] == clear and sent.count(clear) == 1
                 assert voice.report['assistant_hangup'] == 'cancelled'
                 await feed_output(voice, remote, 1200)
+                assert sent[-1] == clear
+                await voice.on_data(turn('user', 'caller-2', 'Bentar, aku mau lanjut.'))
+                await voice.on_data(turn('assistant', 'new-reply', phase='created'))
+                await feed_output(voice, remote, 1500)
                 assert 'modelTurn' in sent[-1]['serverContent']
         finally:
             await voice.close()

@@ -12,11 +12,14 @@ akun dari terminal, memilih cara login dan provider yang tersedia bagi mereka,
 lalu mengatur WhatsApp dan audio Live dari Hermes.
 
 - **A adalah nomor bot Hermes.** Satu koneksi Rust untuk akun A melayani DM
-  pemilik, Control, dan telepon Live. Penautan A untuk plugin memakai perangkat
-  tertaut plugin ini. Satu penautan A berlaku untuk ketiga fungsi tersebut.
+  pemilik, Control, dan telepon Live. Wizard mendeteksi A dari pairing
+  WhatsApp Hermes bila sudah ada. Penautan plugin memverifikasi akun yang
+  memindai QR Live cocok dengan A. Satu penautan A berlaku untuk ketiga fungsi.
 - **B adalah nomor pribadi yang dipakai pemilik untuk menghubungi A.** Pemilik
   bisa menautkan B secara terpisah untuk mengontrol akun pribadinya. B juga bisa
-  tetap dipakai hanya untuk menghubungi A. Akun Control tambahan memakai Baileys.
+  tetap dipakai hanya untuk menghubungi A. Akun Control tambahan memakai Baileys
+  dan identitas diambil dari hasil scan. Cegah A masuk sebagai akun tambahan
+  dan minta konfirmasi sebelum memberikan izin Live atau DM pemilik.
 - Pemilik bisa memilih A, B, beberapa akun, atau semua akun yang dikelola.
   Nomor B dan akun tambahan tidak perlu ikut ditautkan untuk menggunakan Live
   pada A. Jumlah akun mengikuti akun yang ditautkan dan kemampuan WhatsApp.
@@ -24,12 +27,51 @@ lalu mengatur WhatsApp dan audio Live dari Hermes.
   Sesi baru, sesi lama yang dilanjutkan, pesan teks saat menelepon, transkrip,
   konteks lampiran, dan pekerjaan Hermes mengikuti percakapan itu. Provider
   audio bisa diganti sambil mempertahankan sesi Hermes dan panggilan WhatsApp.
-  Target penerimaan mengikuti perilaku Voice di ChatGPT Desktop dari sudut
-  pandang pemilik, terutama kontinuitas konteks, interupsi, dan hasil pekerjaan
-  saat berpindah antara tulisan dan suara.
+  Target penerimaan adalah perilaku yang sama dari sudut pandang pemilik
+  dalam [skenario ChatGPT Live Desktop](#acuan-perilaku-telepon).
 - Kode inti Hermes mengikuti upstream. Gunakan API publik untuk lifecycle,
   setup, perintah, dan kredensial. Catat penggunaan API internal pada integrasi
   sesi dan uji ulang pada setiap build Hermes yang dinyatakan didukung.
+
+## Acuan perilaku telepon
+
+ChatGPT Live di aplikasi Desktop menjadi pembanding untuk pengalaman
+pemilik. Panduan OpenAI menjelaskan percakapan yang bisa disela, penggunaan
+konteks tugas yang sudah ada, dan kemampuan berdiskusi, mengecek progres atau
+mengubah arahan sambil pekerjaan berjalan. Artikel teknis OpenAI menjelaskan
+bahwa aliran suara tetap aktif selama delegasi berjalan secara asinkron.
+Panduan Desktop menjelaskan tombol penutupan untuk pengguna. Kemampuan
+asisten menutup telepon lewat percakapan merupakan syarat pemilik untuk
+plugin ini. Cocokkan cara dan waktunya lewat pembandingan sebelum membuat
+aturan seperti menutup sendiri saat pekerjaan selesai atau saat hening.
+
+| Skenario | Perilaku yang harus dialami pemilik |
+| --- | --- |
+| Mulai dari DM, lalu telepon | Percakapan suara memakai konteks yang sudah relevan, termasuk lampiran dan pekerjaan aktif. Sesudah telepon, lanjutkan lewat DM yang sama. |
+| Minta pekerjaan yang butuh waktu, lalu beralih ke obrolan biasa | Asisten tetap bisa menjawab secara alami selama Hermes bekerja. Ucapan biasa atau pertanyaan progres tidak mengubah, mengulang, atau membatalkan tugas. Progres dan hasil berasal dari tugas yang sama. |
+| Mulai bicara saat asisten sedang menjawab | Audio jawaban lama berhenti saat pemilik menyela, termasuk saat model selesai menghasilkan jawaban tetapi audio masih antre. Panggilan menerima ucapan baru. Tugas aktif tetap berjalan. |
+| Beri arahan baru untuk tugas tertentu | Cocokkan tugas yang dimaksud dan gunakan jalur perubahan arahan Hermes. Permintaan berhenti bicara, permintaan mengakhiri telepon, dan permintaan membatalkan tugas adalah tindakan yang berbeda. |
+| Minta asisten mengakhiri panggilan saat kerja masih berjalan | Asisten bisa menutup panggilan secara nyata setelah memahami maksud pemilik. Uji salam penutup yang alami, ucapan susulan sebelum sambungan putus, dan hasil dari tugas yang sama tetap tersedia di DM. |
+| Hasil atau kebutuhan persetujuan muncul saat sedang mengobrol | Sampaikan status yang benar tanpa merebut giliran pemilik. Gunakan mekanisme persetujuan asli Hermes. |
+
+Bedakan akhir produksi suara di provider, audio yang dikirim sidecar, dan
+audio yang terdengar di perangkat. Respons yang disela tidak boleh dianggap
+telah disampaikan seluruhnya. Pemotongan transkrip sampai kata terakhir
+dan label khusus untuk jawaban terpotong adalah opsi tampilan jika bukti
+audio dan pembandingan mendukungnya. Ketepatan per kata bukan syarat
+penerimaan Live. Periksa bahwa percakapan lanjutan tidak menganggap bagian
+yang belum disampaikan sebagai sesuatu yang sudah didengar pemilik.
+
+Jalankan skenario yang sama di Desktop dan WhatsApp dengan satu pekerjaan
+uji yang cukup lama. Catat versi, provider, waktu mulai jawaban dan waktu
+audio terakhir terdengar setelah disela, penutupan yang benar-benar terjadi,
+serta status dan identitas tugas sebelum dan sesudah. Pengujian simulasi
+menetapkan kontrak dan menangkap regresi. Klaim tentang kelancaran dan
+kesetaraan pengalaman memerlukan pengamatan kedua permukaan.
+
+[Panduan ChatGPT Voice Desktop](https://learn.chatgpt.com/docs/features/voice)
+· [Arsitektur suara GPT-Live](https://openai.com/index/continuous-voice-interaction-with-gpt-live/)
+· [Panduan evaluasi GPT-Live](https://developers.openai.com/cookbook/examples/audio/voice_agent_evaluation)
 
 ## Pemilik dan chatbot tamu
 
@@ -57,16 +99,16 @@ Target pengalaman instalasi dari repositori publik Hermes melalui terminal:
 
 ```sh
 hermes plugins install OWNER/REPO --enable
-hermes wa-control-live setup
+hermes wa-control-live pair
 ```
 
-Wizard memakai profil yang dipilih, memeriksa platform dan dependensi yang
-diperlukan, lalu menyiapkan sidecar yang cocok. Sediakan artefak rilis yang cocok
-dengan sumber dan checksum, atau instruksi build dari sumber untuk platform
-yang memang didukung. Wizard meminta identitas bot dan pemilik, menampilkan QR
-nomor A, memeriksa kecocokan nomor, dan menawarkan akun tambahan dengan label
-pilihan pengguna. Penambahan akun juga bisa dilakukan nanti. Wizard menawarkan
-setup Live saat itu atau nanti, lalu menunjukkan cara menjalankan layanan.
+Paket Git membawa sidecar macOS arm64 yang diverifikasi terhadap checksum
+dan sumber paket. Hermes menyiapkan dependensi Python dan Node saat instalasi
+dengan persetujuan standar. Perintah `pair` mendeteksi bot Hermes,
+mengonfirmasi izin pemilik, lalu menampilkan QR Live untuk akun A. Plugin
+menjalankan transport yang dimiliki adapter gateway setelah akun A tertaut.
+`whatsapp-control pair <label>` menampilkan QR akun tambahan di profil yang
+sama. `setup` dipakai bila perlu mengubah pilihan audio atau menunda scan.
 
 Setup menawarkan **pakai konfigurasi Hermes** dan **siapkan Live manual**.
 Pengguna memilih provider dan model yang mendukung suara Live, suara bila
@@ -114,7 +156,7 @@ perangkat tertaut, dan data runtime miliknya.
 
 | Tindakan | Perintah dan hasil yang diharapkan |
 | --- | --- |
-| Install | `hermes plugins install OWNER/REPO --enable` memasang dari GitHub dan meminta aktivasi. Setelah persetujuan dependensi dan aktivasi, jalankan `hermes wa-control-live setup` untuk setup plugin. Opsi `--no-enable` memasang dalam keadaan nonaktif. |
+| Install | `hermes plugins install OWNER/REPO --enable` memasang paket dari GitHub lewat prompt dependensi Hermes. Petunjuk bawaan instalasi menampilkan `hermes wa-control-live pair`. Opsi `--no-enable` memasang dalam keadaan nonaktif. |
 | Enable | `hermes plugins enable wa-control-live` memulihkan akses plugin di profil. Saat layanan dijalankan kembali, gunakan pairing yang masih valid. |
 | Disable | `hermes plugins disable wa-control-live` menonaktifkan integrasi plugin. Launcher menghentikan proses yang dimiliki plugin. Simpan konfigurasi dan pairing agar bisa dipakai saat diaktifkan kembali. |
 | Update | `hermes plugins update wa-control-live` mengikuti sumber instalasi yang tidak dipin. Untuk instalasi yang dipin, gunakan `hermes plugins install OWNER/REPO --force --ref <SHA-40-karakter>` untuk memilih revisi baru. Verifikasi pairing dan pengaturan sesudah update. |
@@ -202,8 +244,8 @@ arah teruji.
    arahkan audio ke calon setelah siap. Satu koneksi menerima aliran audio
    sebagai koneksi aktif. Ukur jeda dari audio terakhir koneksi lama hingga
    audio pertama koneksi pengganti.
-3. **Tangani hasil yang tertunda.** Simpan bagian percakapan yang benar-benar
-   berlangsung. Tafsirkan event terlambat berdasarkan koneksi dan giliran
+3. **Tangani hasil yang tertunda.** Simpan ucapan final dan status penyampaian
+   yang dapat dibuktikan. Tafsirkan event terlambat menurut koneksi dan giliran
    asalnya. Lanjutkan pekerjaan yang sudah diterima berdasarkan bukti operasi.
    Hasil yang datang selama perpindahan atau setelah tutup telepon tetap
    tersedia di percakapan Hermes yang sama.
@@ -509,6 +551,27 @@ dan penutupan regresi yang memblokir rilis.
   pekerjaan dalam panggilan WhatsApp dan sesi Hermes yang sama. Setelah
   perbaikan Control multiakun dan Live ini, 676 tes Python, 15 subtes, dan
   5 tes bridge Baileys lulus.
+- [x] Simpan ucapan terakhir yang sudah final ketika panggilan ditutup sebelum
+  bot menjawab. Tes memastikan ucapan masuk sekali ke sesi Hermes asal dan
+  penutupan tetap menghormati tugas yang sudah dicatat lewat gateway.
+- [x] Teruskan transkrip suara yang selesai selama persiapan koneksi pengganti.
+  Lewati transkrip yang sudah ada di snapshot lewat identitas pesan atau ID
+  pengajuan tugas Hermes. Hanya ID tanpa tanda tangan yang dipakai sebagai
+  referensi lokal.
+  Uji lokal memeriksa bahwa konteks masuk sebelum koneksi pengganti menerima
+  audio, dengan panggilan, sesi Hermes, dan ID pekerjaan yang sama.
+- [x] Kirim perintah pengosongan antrean ketika pemilik menyela, termasuk
+  setelah provider mengirim transkrip final. Regresi lokal memeriksa jalur
+  audio pemilik, pemutaran jawaban berikutnya, sinyal interupsi lama yang
+  terlambat, pembatalan salam penutup, dan ID tugas yang sama.
+- [ ] Ukur jeda interupsi di WhatsApp nyata dan bandingkan dengan Desktop.
+  Pengosongan antrean sidecar tidak menarik kembali frame yang sudah
+  diserahkan ke jalur media. Bedakan jawaban lengkap dan terputus sesuai
+  bukti yang bisa diukur.
+- [ ] Uji maksud penutupan alami ketika tugas berjalan, dengan dan tanpa
+  permintaan tugas pada ucapan yang sama. Bedakan penutupan panggilan, permintaan
+  berhenti bicara, dan pembatalan tugas. Simulasi penutupan dengan satu maksud
+  dan salam yang bisa disela sudah tersedia.
 - [x] Perbaiki pemulihan akun yang sama setelah gangguan sementara pada
   panggilan aktif. Fixture mengonfirmasi percobaan ulang terikat pada alias akun
   dan API key yang sama jika digunakan. Koneksi gagal ditutup sebelum sesi

@@ -12,8 +12,8 @@ import sys
 import time
 from pathlib import Path
 
-from .runtime import ServiceStopped, activation_ids, active_install, request_worker, runtime_path, socket_dir
-from .settings import JID, account_id, phone_number, private_dir, read_json, write_json
+from .runtime import ServiceStopped, activation_ids, active_install, node_executable, request_worker, runtime_path, socket_dir
+from .settings import JID, account_id, hermes_command, phone_number, private_dir, read_json, write_json
 
 
 def add_arguments(parser):
@@ -44,15 +44,12 @@ def add_arguments(parser):
 
 def prepare(entry):
     source = Path(entry).parent
-    node = shutil.which("node")
-    if not node:
-        raise RuntimeError("Install Node.js 22.13+ and npm before setup.")
     probe = subprocess.run(
-        [node, "--input-type=module", "--eval", "import('node:sqlite'); await import('baileys'); await import('qrcode-terminal');"],
+        [node_executable(), "--input-type=module", "--eval", "import('node:sqlite'); await import('baileys'); await import('qrcode-terminal');"],
         cwd=source, capture_output=True, timeout=15, check=False,
     )
     if probe.returncode:
-        raise RuntimeError("Node dependencies are unavailable. Run npm ci in the installed plugin directory.")
+        raise RuntimeError("Plugin Node dependencies are unavailable. Reinstall with Hermes and accept its Node dependency prompt.")
 
 
 def show(result):
@@ -187,7 +184,8 @@ def run(ctx, entry, args, *, bot_runtime=None, owner_number=None, bot_number=Non
         cleanup_runtime=None, cleanup_guard=None):
     from hermes_constants import get_hermes_home
 
-    root = runtime_path(get_hermes_home())
+    home = get_hermes_home()
+    root = runtime_path(home)
     try:
         if args.action == "setup":
             prepare(entry)
@@ -228,8 +226,24 @@ def run(ctx, entry, args, *, bot_runtime=None, owner_number=None, bot_number=Non
         elif args.action in {"pair", "repair"}:
             if not sys.stdout.isatty():
                 raise RuntimeError("Pairing requires a local interactive terminal for the QR.")
-            show(invoke(root, args.action, {"account": account_id(args.account)},
-                        lambda event: print(event["terminal"], flush=True)))
+            account = account_id(args.account)
+            role = "additional Control account" if bot_runtime is not None else "WhatsApp Control account"
+
+            def show_qr(event):
+                print(f"Scan this QR code from the {role} '{account}'.")
+                print("On that phone, open WhatsApp > Linked devices > Link a device.")
+                print(event["terminal"], flush=True)
+
+            try:
+                result = invoke(root, args.action, {"account": account}, show_qr)
+            except ServiceStopped as error:
+                if bot_runtime is not None and read_json(bot_runtime / "config.json").get("hermes_runtime"):
+                    status = hermes_command(home, "gateway", "status")
+                    raise RuntimeError(f"Start this profile's Hermes gateway after linking its bot. Check with `{status}`.") from error
+                command = "wa-control-live" if bot_runtime is not None else "whatsapp-control"
+                serve = hermes_command(home, command, "serve")
+                raise RuntimeError(f"Service is stopped. Start it in another terminal with `{serve}`.") from error
+            show(result)
         elif args.action == "unlink":
             show(invoke(root, "unlink", {"account": account_id(args.account)}))
         elif args.action == "configure":

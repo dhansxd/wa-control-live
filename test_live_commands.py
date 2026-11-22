@@ -258,7 +258,14 @@ def test_natural_provider_tool_denies_unbound_or_mismatched_session(plugin, prov
 def test_natural_provider_tool_rejects_invalid_payloads_without_changes(plugin, provider_tool, args, status):
     with provider_turn(plugin, dm(), "Change the provider."):
         result = provider_tool(args)
-    assert result["status"] == status
+    if "profile" in args and "error" in result:
+        # Hermes v0.23.2 rejects undeclared parameters before the plugin handler runs.
+        assert result["error"] == (
+            f"profile: not a parameter of {plugin.commands.PROVIDER_TOOL}. "
+            "The tool was NOT invoked. Valid parameters: selection, now."
+        )
+    else:
+        assert result["status"] == status
     assert "secret.example" not in json.dumps(result)
     assert plugin.calls == []
     assert plugin.ctx.get_config("live.selected") == "codex"

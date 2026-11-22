@@ -139,7 +139,7 @@ async fn pair(phone: Option<String>) -> Result<()> {
         let _ = worker.await;
     }
     let _ = std::fs::remove_file(&qr_file);
-    println!("Linked. Start the sidecar with: hermes whatsapp-voice serve");
+    println!("WhatsApp device linked.");
     Ok(())
 }
 

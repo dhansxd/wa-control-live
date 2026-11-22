@@ -26,10 +26,24 @@ def _launcher():
     return launcher
 
 
+def _bundled_runtime():
+    import hermes_constants
+    from .setup_sidecar import packaged_sidecar
+
+    binary, checksum = packaged_sidecar(STAGE / "source" / "hermes-wa-voice-opus-media-1")
+    return {
+        "binary": binary,
+        "python": Path(sys.executable),
+        "hermes_runtime": Path(hermes_constants.__file__).resolve().parent,
+        "sidecar_sha256": checksum,
+    }
+
+
 def _parser(parser):
     commands = parser.add_subparsers(dest="action", required=True)
-    setup = commands.add_parser("setup", help="Guide setup for the current Hermes profile")
-    setup.add_argument("--sidecar", type=Path, help="Use a prepared macOS arm64 sidecar instead of the wizard")
+    setup = commands.add_parser("setup", help="Set up WhatsApp and guide QR pairing for this Hermes profile")
+    setup.add_argument("--stock-profile", help="Detect the bot from another Hermes profile's WhatsApp pairing")
+    setup.add_argument("--sidecar", type=Path, help="Use a prepared macOS arm64 sidecar")
     setup.add_argument("--sidecar-sha256", help="Expected SHA-256 for a local unified sidecar build")
     setup.add_argument("--reuse-pairing-from", type=Path, help="Private state of a stopped voice launcher")
     commands.add_parser("status", help="Check voice pairing and service status")
@@ -37,7 +51,8 @@ def _parser(parser):
     use = commands.add_parser("use", help="Choose a Live provider or pool")
     use.add_argument("selection")
     use.add_argument("timing", nargs="?", choices=("now",))
-    commands.add_parser("pair", help="Link the voice device to this profile's WhatsApp bot")
+    pair = commands.add_parser("pair", help="Link the Hermes bot and show its Live pairing QR")
+    pair.add_argument("--stock-profile", help="Read the bot identity from this other Hermes profile")
     commands.add_parser("serve", help="Run the profile's WhatsApp service")
     cleanup = commands.add_parser("cleanup", help="Stop this profile's Control and Live services")
     cleanup.add_argument("--purge", action="store_true", help="Also remove this plugin's data and request device unlink")
@@ -120,8 +135,11 @@ def _serve_activation(home, ctx):
     entrypoint = Path(__file__).absolute()
     identity = entrypoint.stat()
     names = {ctx.plugin_id, ctx.manifest.name}
+    gateway_pid = os.environ.get("WA_CONTROL_LIVE_GATEWAY_PID")
 
     def is_active():
+        if gateway_pid is not None and str(os.getppid()) != gateway_pid:
+            return False
         try:
             current = entrypoint.stat()
             if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
@@ -139,6 +157,17 @@ def _serve_activation(home, ctx):
         return isinstance(enabled, list) and bool(names.intersection(enabled))
 
     return is_active
+
+
+def _gateway_transport_command(home):
+    import hermes_constants
+    from .whatsapp_control.speech import _command
+
+    env = os.environ.copy()
+    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__"):
+        env.pop(key, None)
+    env.update(HERMES_HOME=str(home), WA_CONTROL_LIVE_GATEWAY_PID=str(os.getpid()))
+    return _command(Path(hermes_constants.__file__).resolve(), home, "serve", cli="wa-control-live"), env
 
 
 def _configured_pair(ctx):
@@ -239,9 +268,12 @@ async def _run_voice_hook(operation, *args):
 def _live_operation(ctx, state, launcher, action, *, selection=None, now=False):
     enabled = _live_enabled(ctx)
     if action == "status":
+        from .whatsapp_control.settings import read_json
+
         report = launcher.status({"private": str(state)})
         report["data_dir"] = str(state)
         report["runtime_prepared"] = (state / "config.json").is_file()
+        report["autostart"] = bool(read_json(state / "config.json").get("hermes_runtime"))
         report["live_enabled"] = enabled
         return report
     if not enabled:
@@ -305,17 +337,18 @@ def _run(ctx, args):
         _require_control_ownership()
         cleanup(runtime_path(home), args.purge, cleanup_runtime=partial(_cleanup_live_runtime, ctx))
         return
-    if args.action == "setup" and args.sidecar is None:
-        if args.sidecar_sha256 or args.reuse_pairing_from:
-            raise ValueError("--sidecar-sha256 and --reuse-pairing-from require --sidecar.")
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            raise RuntimeError("Run setup in an interactive terminal, or pass --sidecar for manual setup.")
-        from .setup_wizard import run_setup
-
-        try:
-            run_setup(ctx, home, _launcher())
-        except (EOFError, KeyboardInterrupt):
-            raise SystemExit("Setup cancelled.") from None
+    if args.action == "setup" and (args.sidecar is None or args.stock_profile is not None):
+        if args.sidecar is None and args.sidecar_sha256:
+            raise ValueError("--sidecar-sha256 requires --sidecar.")
+        if args.reuse_pairing_from:
+            raise ValueError("Interactive setup links its own device. --reuse-pairing-from is only for manual setup.")
+        if args.sidecar is not None and not args.sidecar_sha256:
+            raise ValueError("Pass --sidecar-sha256 for the candidate unified build.")
+        setup_options = {}
+        if args.stock_profile is not None:
+            setup_options.update(stock_profile=args.stock_profile, sidecar=args.sidecar,
+                                 sidecar_sha256=args.sidecar_sha256)
+        _interactive_setup(ctx, home, **setup_options)
         return
     pair = _configured_pair(ctx)
     if args.action == "agent-job":
@@ -354,6 +387,16 @@ def _run(ctx, args):
             raise SystemExit(1)
         return
 
+    from .whatsapp_control.settings import hermes_command, read_json
+
+    if args.action == "pair" and not (state / "config.json").is_file():
+        _interactive_setup(ctx, home, stock_profile=args.stock_profile, pair_now=True)
+        return
+    if args.action == "serve" and not (state / "config.json").is_file():
+        raise RuntimeError(f"Link the Hermes bot first: {hermes_command(home, 'wa-control-live', 'pair')}")
+    if args.action == "pair" and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        raise RuntimeError("Open a local interactive terminal to show the bot's pairing QR.")
+
     owner, bot = pair or resolve_identity(home)
     binary = state / "hermes-wa-voice"
     python = state / "venv" / "bin" / "python"
@@ -377,14 +420,17 @@ def _run(ctx, args):
             _setup(launcher, state, args.sidecar, binary, python, allowed, require_codex=False)
         else:
             _setup(launcher, state, args.sidecar, binary, python, allowed)
-    elif not (state / "config.json").is_file():
-        raise RuntimeError("Run hermes wa-control-live setup first")
-    config = launcher.prepare_profile(
-        owner=owner, bot=bot, private=state, binary=binary, python=python, hermes_home=home,
-        **({"unified_gateway": True, "sidecar_sha256": candidate_sha256} if pair else {}),
-    )
+    runtime = {"binary": binary, "python": python}
+    if pair:
+        runtime.update(unified_gateway=True, sidecar_sha256=candidate_sha256)
+        if args.action != "setup" and read_json(state / "config.json").get("hermes_runtime"):
+            runtime.update(_bundled_runtime())
+    config = launcher.prepare_profile(owner=owner, bot=bot, private=state, hermes_home=home, **runtime)
     if args.action == "pair":
-        launcher.pair(config)
+        from .setup_wizard import pair_bot
+
+        pair_bot(launcher, config)
+        print("Hermes bot link verified. The plugin runs with this profile's Hermes gateway.")
     elif args.action == "serve":
         options = {}
         if not _live_enabled(ctx):
@@ -407,6 +453,17 @@ def _run(ctx, args):
         print("Voice runtime ready. Use hermes wa-control-live status to check pairing.")
 
 
+def _interactive_setup(ctx, home, **options):
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise RuntimeError("Open a local interactive terminal for WA Control & Live setup and QR pairing.")
+    from .setup_wizard import run_setup
+
+    try:
+        run_setup(ctx, home, _launcher(), **options)
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit("Setup cancelled.") from None
+
+
 def register(ctx):
     from .live_agent import CALL_INTENT_TASK
     from .live_commands import PROVIDER_SCHEMA, PROVIDER_TOOL, provider_tool_handler, walive_handler
@@ -418,10 +475,14 @@ def register(ctx):
         from hermes_constants import get_hermes_home
         from .whatsapp_owner_authorization import owner_send_request
         from .whatsapp_gateway import register_gateway
+        from .whatsapp_control.settings import read_json
 
-        register_gateway(ctx, *pair)
         owner, bot = pair
         runtime = ctx.state.data_dir / "unified"
+        if read_json(runtime / "config.json").get("hermes_runtime"):
+            register_gateway(ctx, *pair, transport_command=partial(_gateway_transport_command, get_hermes_home().resolve()))
+        else:
+            register_gateway(ctx, *pair)
 
         def authenticated_request(session_id):
             return owner_send_request(get_hermes_home().resolve(), owner, session_id, runtime,

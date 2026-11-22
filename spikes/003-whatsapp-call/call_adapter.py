@@ -98,6 +98,9 @@ AGENT_OUTPUT_LIMIT = 3500
 RESULT_ACK_TIMEOUT = 10
 RESULT_SPEECH_QUIET_SECONDS = 1
 PCM_SILENCE_PEAK = 16  # 16-bit PCM; covers the idle noise floor of the realtime track.
+# The sidecar primes two 60 ms frames and hands off through an eight-frame channel.
+# Use this estimate only to avoid muting a fresh response after a quiet gap.
+PLAYOUT_MARGIN_SECONDS = 0.6
 CHAT_UPDATE_CHUNK_BYTES = 500
 RECENT_TOOL_STEPS = 12
 VOICE_HISTORY_FLUSH_TIMEOUT = 1.5
@@ -840,11 +843,13 @@ class LiveCall:
         self.work_preview_task = None
         self.last_speech_activity = self.began
         self.active_reply_turn = None
+        self.latest_reply_turn = None
+        self.playout_expected_until = 0.0
         self.result_speech_start_deadline = None
         self.work_preview_start = None
         self.ambiguous_preview_turn = None
         self.interrupted_replies = set()
-        self.voice_interrupted = False
+        self.interrupted_output_until = 0.0
         self.last_spoken_exchange = ''
         self.current_spoken_turn = None
         self.spoken_turn_final = False
@@ -1019,9 +1024,14 @@ class LiveCall:
     async def replace_audio(self, selection=None, *, exclude=(), only=None):
         old = self.audio
         candidate = None
-        self.switch_updates = []
+        self.switch_updates = deque()
         try:
             async with asyncio.timeout(LIVE_SETUP_TIMEOUT):
+                turn_id = self.current_spoken_turn
+                if self.spoken_turn_final:
+                    self.remember_switch_transcript(
+                        'user', self.user_turns[turn_id], self.exchange_id(turn_id), turn_id=turn_id,
+                    )
                 history = []
                 work = self.dm_work
                 if self.agent_jobs is not None:
@@ -1047,13 +1057,13 @@ class LiveCall:
                         if not old.failed.is_set():
                             raise
                 async with self.context_lock:
-                    for refs, text in self.switch_updates:
-                        if not refs or not seeded_refs.issuperset(refs):
-                            await candidate.link.append_context(text)
+                    await self.replay_switch_context(candidate, seeded_refs)
                     async with self.output_lock:
                         if self.closed or self.failed.is_set() or candidate.failed.is_set():
                             raise RuntimeError('Audio changed before the replacement was ready')
-                        await self.send({'serverContent': {'interrupted': True}})
+                        await self.clear_playout()
+                        # The old provider can finish a transcript while the sidecar send yields.
+                        await self.replay_switch_context(candidate, seeded_refs)
                         if self.closed or self.failed.is_set() or candidate.failed.is_set():
                             raise RuntimeError('Audio changed before the replacement was ready')
                         self.finish_exchange(user_only=True)
@@ -1067,13 +1077,21 @@ class LiveCall:
                         self.report.pop('error', None)
                         self.install_audio(candidate)
                         self.seeded_message_refs = seeded_refs
-                        self.voice_interrupted = False
+                        self.latest_reply_turn = None
+                        self.interrupted_output_until = 0.0
                         self.retire_audio(old)
                 return candidate.candidate
         finally:
             self.switch_updates = None
             if candidate is not None and self.audio is not candidate:
                 self.retire_audio(candidate)
+
+    async def replay_switch_context(self, candidate, seeded_refs):
+        while self.switch_updates:
+            refs, text, submission_ref = self.switch_updates.popleft()
+            if (submission_ref and submission_ref in seeded_refs) or (refs and seeded_refs.issuperset(refs)):
+                continue
+            await candidate.link.append_context(text)
 
     def fail(self, message):
         self.report.setdefault('error', safe_text(message))
@@ -1168,7 +1186,7 @@ class LiveCall:
             updates = chain(chat_update_chunks(history), (((), text) for text in texts))
             for refs, text in updates:
                 if self.switch_updates is not None:
-                    self.switch_updates.append((refs, text))
+                    self.switch_updates.append((refs, text, None))
                 if refs and self.seeded_message_refs.issuperset(refs):
                     continue
                 if self.routing is not None and self.audio.failed.is_set():
@@ -1268,8 +1286,11 @@ class LiveCall:
     def suppress_model_output(self):
         if self.failed.is_set() or (self.audio is not None and self.audio.failed.is_set()):
             return True
+        interrupted = self.interrupted_output_until and (
+            not self.spoken_turn_final or asyncio.get_running_loop().time() < self.interrupted_output_until
+        )
         # An earlier Hermes job may still be running while the caller asks a simple question.
-        return (self.voice_interrupted or
+        return (interrupted or
                 self.current_spoken_turn in self.pending_ack.values() and not self.result_acknowledged)
 
     def interrupt_reply(self):
@@ -1279,13 +1300,35 @@ class LiveCall:
         self.active_reply_turn = None
         self.assistant_reply_turn = None
         self.result_speech_start_deadline = None
-        self.voice_interrupted = True
+        self.interrupted_output_until = float('inf')
+
+    async def clear_playout(self):
+        # Called under output_lock so a PCM frame cannot overtake the clear.
+        self.playout_expected_until = 0.0
+        await self.send({'serverContent': {'interrupted': True}})
+
+    def exchange_id(self, key):
+        return uuid.uuid5(uuid.NAMESPACE_URL, f'wa-control-live:{self.path.name}:exchange:{key}').hex
+
+    def submission_id(self, turn_id):
+        return uuid.uuid5(uuid.NAMESPACE_URL, f'wa-control-live:{self.path.name}:{turn_id}').hex
+
+    def remember_switch_transcript(self, role, text, exchange_id, *, turn_id=None):
+        if self.switch_updates is not None:
+            refs = (f'wa-control-live:{exchange_id}:{role}',)
+            submission_ref = f'wa-voice-submission:{self.submission_id(turn_id)}' if turn_id is not None else None
+            speaker = 'Pemilik' if role == 'user' else 'Asisten'
+            self.switch_updates.extend(
+                (refs, chunk, submission_ref) for chunk in context_chunks(
+                    text[:12000], f'Transkrip telepon. {speaker}: ', f'Lanjutan transkrip telepon. {speaker}: ',
+                )
+            )
 
     def voice_exchange(self, turn_id, assistant_turn, user, assistant, user_at_ms, assistant_at_ms):
         key = turn_id if user else f'{turn_id}:{assistant_turn}'
         exchange = {
             '_turn_id': turn_id,
-            'exchange_id': uuid.uuid5(uuid.NAMESPACE_URL, f'wa-control-live:{self.path.name}:exchange:{key}').hex,
+            'exchange_id': self.exchange_id(key),
             'user': user[:12000],
             'assistant': assistant[:12000],
         }
@@ -1293,6 +1336,7 @@ class LiveCall:
             exchange['user_at_ms'] = user_at_ms
         if assistant:
             exchange['assistant_at_ms'] = assistant_at_ms
+            self.remember_switch_transcript('assistant', assistant, exchange['exchange_id'])
         return exchange
 
     def start_exchange_writer(self):
@@ -1450,6 +1494,10 @@ class LiveCall:
                 return
             if self.closed:
                 return
+            if audible:
+                self.playout_expected_until = max(
+                    self.playout_expected_until, self.last_speech_activity + PLAYOUT_MARGIN_SECONDS,
+                ) + (len(data) / (24_000 * 2))
             await self.send(audio_envelope(data))
             if audible and self.pending_end_call and self.assistant_reply_turn:
                 self.farewell_audio_sent = True
@@ -1473,7 +1521,7 @@ class LiveCall:
         if any(pcm):
             self.mark('first_caller_nonzero_pcm_received')
 
-    async def cancel_end_call(self):
+    def cancel_end_call(self):
         self.farewell_audio_sent = self.farewell_transcribed = False
         if self.pending_end_call:
             item_id, _ = self.pending_end_call
@@ -1486,9 +1534,8 @@ class LiveCall:
         if self.end_call_sent:
             self.end_call_sent = None
             self.report['assistant_hangup'] = 'cancelled'
-            async with self.output_lock:
-                # This is the sidecar's existing interruption signal. Do not wait for final STT.
-                await self.send({'serverContent': {'interrupted': True}})
+            return True
+        return False
 
     async def end_after_farewell(self):
         # Caller and assistant turn events race the PCM stream, so require both the spoken
@@ -1527,8 +1574,16 @@ class LiveCall:
             self.mark(kind)
         if kind == 'turn.interrupted':
             async with self.output_lock:
+                turn_id = event.get('turn_id')
+                if isinstance(turn_id, str) and (
+                    turn_id in self.interrupted_replies
+                    or (turn_id in self.finished_replies and turn_id != self.latest_reply_turn)
+                ):
+                    return
+                if self.interrupted_output_until and not self.playout_expected_until:
+                    return
                 self.interrupt_reply()
-                await self.send({'serverContent': {'interrupted': True}})
+                await self.clear_playout()
         elif kind == 'error':
             self.fail(str(event.get('error', event)))
         elif kind in {'turn.created', 'turn.done'}:
@@ -1585,6 +1640,7 @@ class LiveCall:
                     if text:
                         self.user_turns[turn_id] = text
                         self.transcripts_done[turn_id].set()
+                        self.remember_switch_transcript('user', text, self.exchange_id(turn_id), turn_id=turn_id)
                         if (deferred := self.deferred_handoffs.pop(turn_id, None)) and not history_only:
                             item, released_early = deferred
                             self.start_handoff(item, turn_id, released_early=released_early)
@@ -1596,13 +1652,23 @@ class LiveCall:
                         else:
                             self.finish_pending_spoken_reply(turn_id)
                 if started and not history_only:
-                    if playing and kind == 'turn.created':
-                        self.interrupted_replies.add(playing)
-                        self.reply_transcripts.pop(playing, None)
-                        self.voice_interrupted = True
+                    notify_cancel = self.cancel_end_call()
+                    clear_old_audio = kind == 'turn.created' and bool(playing or self.playout_expected_until)
+                    if clear_old_audio:
+                        if old_reply := playing or self.latest_reply_turn:
+                            self.interrupted_replies.add(old_reply)
+                            self.reply_transcripts.pop(old_reply, None)
+                        if playing:
+                            self.interrupted_output_until = float('inf')
+                        elif self.playout_expected_until > self.last_speech_activity:
+                            # After a final transcript, guard the untagged PCM tail. A fresh
+                            # reply can start before its turn event once the caller has finished.
+                            self.interrupted_output_until = min(
+                                self.playout_expected_until, self.last_speech_activity + PLAYOUT_MARGIN_SECONDS,
+                            )
+                    if clear_old_audio or (notify_cancel and not self.interrupted_output_until):
                         async with self.output_lock:
-                            await self.send({'serverContent': {'interrupted': True}})
-                    await self.cancel_end_call()
+                            await self.clear_playout()
             elif kind == 'turn.created' and identified:
                 if turn_id in self.reply_transcripts:
                     return
@@ -1615,8 +1681,9 @@ class LiveCall:
                 preview_may_start = preview is not None and preview[1] > asyncio.get_running_loop().time()
                 if preview_may_start and preview[0] != self.current_spoken_turn:
                     self.ambiguous_preview_turn = turn_id, self.current_spoken_turn
-                self.voice_interrupted = False
+                self.interrupted_output_until = 0.0
                 self.active_reply_turn = turn_id
+                self.latest_reply_turn = turn_id
                 if not (preview_may_start or self.result_acknowledged or self.result_speech_start_deadline is not None):
                     self.assistant_reply_turn = turn_id
                 self.result_speech_start_deadline = None
@@ -1855,7 +1922,7 @@ class LiveCall:
             return True
         except OSError as exc:
             if self.pending_end_call and self.pending_end_call[0] == item_id:
-                await self.cancel_end_call()
+                self.cancel_end_call()
             self.pending_ack.pop(item_id, None)
             self.pending_deliveries.pop(item_id, None)
             key = 'handoff_ack_timeouts' if isinstance(exc, TimeoutError) else 'handoff_send_failures'
@@ -2140,7 +2207,7 @@ class LiveCall:
         return 'Bila detailnya belum tersedia, minta petunjuk singkat.'
 
     async def submit_task(self, item_id, turn_id, request, *, attachment_admission_id=None):
-        submission_id = uuid.uuid5(uuid.NAMESPACE_URL, f'wa-control-live:{self.path.name}:{turn_id}').hex
+        submission_id = self.submission_id(turn_id)
         call_context = {'direction': self.call_direction} if self.call_direction is not None else {}
         if attachment_admission_id is not None:
             call_context['attachment_admission_id'] = attachment_admission_id
@@ -2299,7 +2366,8 @@ class LiveCall:
         if buffered_transcripts is not None:
             for event in buffered_transcripts():
                 await self.on_data(event, history_only=True)
-        self.finish_exchange(user_only=buffered_transcripts is not None)
+        # A final caller transcript can already be available without provider buffering.
+        self.finish_exchange(user_only=True)
         if self.completed_exchanges:
             try:
                 await asyncio.wait_for(self.save_exchanges(), AGENT_CONTEXT_TIMEOUT)
