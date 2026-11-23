@@ -63,6 +63,15 @@ aturan seperti menutup sendiri saat pekerjaan selesai atau saat hening.
 | Minta ditelepon kembali | Permintaan pemilik dari telepon atau DM dapat menjadwalkan satu panggilan melalui cron Hermes. Bedakan permintaan yang baru masuk dari jadwal yang sudah tersimpan. Jika pemilik sekaligus berpamitan, pertahankan pekerjaan yang sudah diterima dan tutup panggilan saat ini sesuai maksudnya. |
 | Hasil atau kebutuhan persetujuan muncul saat sedang mengobrol | Sampaikan status yang benar tanpa merebut giliran pemilik. Sebut kebutuhan persetujuan saat Hermes benar-benar memerlukannya dan gunakan mekanisme persetujuan asli Hermes. |
 
+Pada jalur Codex, utamakan delegasi dari provider. Jika pemilik memberi
+permintaan tindakan dan Codex sudah menjawabnya langsung lewat suara, gunakan
+transkrip final pemilik untuk memeriksa apakah satu tugas masih perlu masuk
+ke sesi DM aktif. Pemeriksaan berlangsung sambil suara tetap berjalan. Pakai
+pemeriksaan maksud Hermes yang sama serta ID pengajuan yang sama jika
+delegasi menyusul. Akui pekerjaan berjalan berdasarkan status eksekusi, dan
+pengiriman berdasarkan tanda terima pengirim untuk pesan atau berkas itu.
+Saat ditanya progres, gunakan temuan alat yang benar-benar sudah tersedia.
+
 Bedakan akhir produksi suara di provider, audio yang dikirim sidecar, dan
 audio yang terdengar di perangkat. Respons yang disela tidak boleh dianggap
 telah disampaikan seluruhnya. Pemotongan transkrip sampai kata terakhir

@@ -469,6 +469,33 @@ def _file_change(result, tool_name, args, *, include_code):
     return change
 
 
+def _native_result_finding(tool_name, result):
+    """Project facts from Hermes tool schemas without including the material they read or produced."""
+    if result.get('error'):
+        return ''
+    if tool_name == 'web_search' and result.get('success') is True:
+        data = result.get('data')
+        hits = data.get('web') if isinstance(data, dict) else None
+        if isinstance(hits, list) and len(hits) <= 100 and all(isinstance(hit, dict) for hit in hits):
+            return f'Pencarian web mengembalikan {len(hits)} hasil.'
+    elif tool_name == 'search_files':
+        count = result.get('total_count')
+        if type(count) is int and 0 <= count < 2**63:
+            if result.get('total_count_is_lower_bound') is True or result.get('truncated') is True:
+                return f'Pencarian file melaporkan setidaknya {count} hasil.'
+            return f'Pencarian file melaporkan {count} hasil dalam cakupan yang diperiksa.'
+    elif tool_name == 'read_file' and isinstance(result.get('content'), str) and not result.get('is_binary'):
+        lines = result.get('total_lines')
+        if type(lines) is int and 0 <= lines < 2**63:
+            return f'Tool melaporkan panjang file {lines} baris.'
+    elif tool_name in {'image_generate', 'video_generate'} and result.get('success') is True:
+        medium = 'image' if tool_name == 'image_generate' else 'video'
+        artifact = result.get(medium)
+        if isinstance(artifact, str) and artifact.strip():
+            return 'Tool menghasilkan gambar.' if medium == 'image' else 'Tool menghasilkan video.'
+    return ''
+
+
 def _tool_result_fields(payload, tool_name, *, include_code=False):
     result = payload.get('result')
     if isinstance(result, str):
@@ -484,8 +511,19 @@ def _tool_result_fields(payload, tool_name, *, include_code=False):
               or result.get('status') in ('failed', 'error', 'rejected')
               or (type(code) is int and code != 0))
     fields = {'phase': 'failed' if failed else 'completed'}
+    if failed and tool_name in {'web_search', 'search_files', 'read_file', 'image_generate', 'video_generate'}:
+        # These tools may put prompts, queries and file contents in exception messages.
+        if (tool_name == 'video_generate' and result.get('success') is False
+                and result.get('error_type') == 'job_failed'):
+            fields['finding'] = 'Provider melaporkan pembuatan video gagal.'
+        return fields
     if failed and type(code) is int and code != 0:
         fields['exit_code'] = code
+    # The gateway wraps an oversized result in a raw JSON prefix. It can contain arbitrary
+    # page content, file contents or provider diagnostics even when the key is named "error".
+    if result.get('truncated') is True and (result.keys() == {'error', 'truncated'}
+                                            or result.keys() == {'output', 'truncated'}):
+        return fields
     if failed:
         error = result.get('error')
         if isinstance(error, dict):
@@ -496,6 +534,8 @@ def _tool_result_fields(payload, tool_name, *, include_code=False):
         fields.update(application_outcome='failed', finding=finding)
     elif file_tool and (change := _file_change(result, tool_name, payload.get('args'), include_code=include_code)):
         fields['file_change'] = change
+    elif finding := _native_result_finding(tool_name, result):
+        fields['finding'] = finding
     return fields
 
 

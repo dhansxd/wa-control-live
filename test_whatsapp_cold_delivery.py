@@ -1,8 +1,8 @@
 """Compare historical WA Control & Live revisions with the same cold-call scenario.
 
-Only the model's work and the WhatsApp sidecar are simulated. The plugin's
-Live commands, Hermes routing, admission, delivery and attachment staging run
-in a temporary Hermes home. The sidecar is HTTP loopback only.
+The model, audio peer and WhatsApp sidecar use synthetic fixtures. Live commands,
+Hermes routing, admission, delivery and attachment staging run in a temporary
+Hermes home. The sidecar is HTTP loopback only.
 """
 
 import asyncio
@@ -13,6 +13,7 @@ from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -27,13 +28,63 @@ PNG = base64.b64decode(
 )
 
 
-@pytest.mark.parametrize("origin,inbound_after_restart,image_status", [
-    pytest.param(LID, False, 200, id="persisted-lid-first-call"),
-    pytest.param(LID, True, 200, id="persisted-lid-dm-before-call"),
-    pytest.param(PHONE, False, 200, id="persisted-phone-first-call"),
-    pytest.param(PHONE, False, 422, id="photo-rejected-after-text-sent"),
+@asynccontextmanager
+async def spoken_image_request(home, session_id, voice, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parent / "spikes" / "003-whatsapp-call"))
+    from call_adapter import AgentJobs
+    from test_general_delegation import audio_messages, feed_output, local_voice
+
+    request_text = "Buatkan satu gambar."
+    decisions, admissions = [], []
+    submitted = asyncio.Event()
+
+    async def classify(**kwargs):
+        intent = json.loads(kwargs["input"][0]["text"])
+        decisions.append((intent["current"], intent["proposal"]))
+        return SimpleNamespace(parsed={"action": "task", "evidence": request_text})
+
+    async def dispatch(request, _timeout):
+        result = await voice(request, llm=SimpleNamespace(acomplete_structured=classify))
+        if request.get("action", "submit") == "submit":
+            admissions.append(result)
+            submitted.set()
+        return result
+
+    worker = AgentJobs(home)
+    monkeypatch.setattr(worker, "_request", dispatch)
+    call, remote, sent, _ = local_voice(home / "call", monkeypatch, agent_jobs=worker)
+    call.hermes_session_id = session_id
+    call.call_direction = "inbound"
+    try:
+        call.feed(struct.pack("<h", 800) * 320)
+        await call.on_data({"type": "turn.created", "turn": {"id": "caller", "role": "user"}})
+        await call.on_data({"type": "turn.done", "turn": {"id": "caller", "role": "user", "transcript": request_text}})
+        await call.on_data({"type": "turn.created", "turn": {"id": "reply", "role": "assistant"}})
+        await feed_output(call, remote, 1400)
+        await call.on_data({"type": "turn.done", "turn": {"id": "reply", "role": "assistant",
+                           "transcript": "Aku akan buat gambarnya dan kirim ke chat ini."}})
+        assert audio_messages(sent)
+        try:
+            await asyncio.wait_for(submitted.wait(), 4)
+        except TimeoutError:
+            pytest.fail(f"Spoken request produced {len(decisions)} route decisions and {len(admissions)} admissions")
+        assert admissions[0]["receipt"]["session_id"] == session_id
+        yield admissions[0]
+        assert decisions == [(request_text, "")] and len(admissions) == 1
+        assert not call.delegations and not call.closed and not call.failed.is_set()
+    finally:
+        await asyncio.wait_for(call.close(), 5)
+
+
+@pytest.mark.parametrize("origin,inbound_after_restart,image_status,spoken", [
+    pytest.param(LID, False, 200, False, id="persisted-lid-first-call"),
+    pytest.param(LID, True, 200, False, id="persisted-lid-dm-before-call"),
+    pytest.param(PHONE, False, 200, False, id="persisted-phone-first-call"),
+    pytest.param(PHONE, False, 422, False, id="photo-rejected-after-text-sent"),
+    pytest.param(LID, False, 200, True, id="spoken-without-delegation-accepted"),
+    pytest.param(LID, False, 422, True, id="spoken-without-delegation-rejected"),
 ])
-def test_first_voice_task_delivers_image(tmp_path, monkeypatch, origin, inbound_after_restart, image_status):
+def test_first_voice_task_delivers_image(tmp_path, monkeypatch, origin, inbound_after_restart, image_status, spoken):
     home = tmp_path / "profile"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -74,6 +125,7 @@ def test_first_voice_task_delivers_image(tmp_path, monkeypatch, origin, inbound_
         connected = asyncio.Event()
         stop = asyncio.Event()
         outbound = []
+        image_started = asyncio.Event()
         release_image = asyncio.Event()
 
         async def health(_):
@@ -91,6 +143,7 @@ def test_first_voice_task_delivers_image(tmp_path, monkeypatch, origin, inbound_
                 return web.json_response({"message_id": "fixture-text"})
             assert body["kind"] == "image" and Path(body["path"]).read_bytes() == PNG
             outbound.append(("image", body["chat_id"]))
+            image_started.set()
             await release_image.wait()
             result = "accepted" if image_status == 200 else "rejected"
             record = {"message_id": body["message_id"], "status": result, "chat_id": body["chat_id"]}
@@ -152,23 +205,11 @@ def test_first_voice_task_delivers_image(tmp_path, monkeypatch, origin, inbound_
             from whatsapp_media_delivery import read_media_delivery
             options["read_media_delivery"] = partial(read_media_delivery, runtime, BOT)
 
-        async def voice(request):
+        async def voice(request, *, llm=None):
             return await live_agent._run(home, OWNER, request, resolve=resolve_owner_session,
-                                         connect=connect, poll_seconds=5, **options)
+                                         connect=connect, poll_seconds=5, llm=llm, **options)
 
-        try:
-            assert await adapter.connect()
-            await asyncio.wait_for(connected.wait(), 3)
-            assert adapter.verified
-            if inbound_after_restart:
-                await adapter._receive_message({"id": "dm-before-call", "text": "Halo", "chat_id": LID,
-                                                "sender_id": LID, "sender_id_alt": PHONE})
-            opened = await voice({"action": "context"})
-            assert opened["session_id"] == entry.session_id
-            receipt = await voice({"action": "submit", "session_id": opened["session_id"],
-                                   "submission_id": "2" * 32, "text": "Buatkan satu gambar.",
-                                   "direction": "inbound"})
-            assert receipt["status"] == "completed", receipt
+        async def verify_delivery(receipt):
             observe = {"action": "observe_work", **receipt["receipt"]}
             during_upload = await voice(observe)
             assert during_upload["status"] == "completed" and during_upload["has_attachments"]
@@ -184,6 +225,27 @@ def test_first_voice_task_delivers_image(tmp_path, monkeypatch, origin, inbound_
             assert after_upload["text_delivery"] == "sent"
             assert after_upload.get("media_delivery") == ("sent" if image_status == 200 else "rejected")
             assert jobs == [entry.session_id]
+
+        try:
+            assert await adapter.connect()
+            await asyncio.wait_for(connected.wait(), 3)
+            assert adapter.verified
+            if inbound_after_restart:
+                await adapter._receive_message({"id": "dm-before-call", "text": "Halo", "chat_id": LID,
+                                                "sender_id": LID, "sender_id_alt": PHONE})
+            opened = await voice({"action": "context"})
+            assert opened["session_id"] == entry.session_id
+            if spoken:
+                async with spoken_image_request(home, entry.session_id, voice, monkeypatch) as receipt:
+                    await asyncio.wait_for(image_started.wait(), 5)
+                    assert all(dest == PHONE for _, dest in outbound)
+                    await verify_delivery(receipt)
+            else:
+                receipt = await voice({"action": "submit", "session_id": opened["session_id"],
+                                       "submission_id": "2" * 32, "text": "Buatkan satu gambar.",
+                                       "direction": "inbound"})
+                assert receipt["status"] == "completed", receipt
+                await verify_delivery(receipt)
         finally:
             release_image.set()
             await connection.close()

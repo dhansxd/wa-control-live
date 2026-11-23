@@ -874,6 +874,79 @@ def test_browser_successful_page_read_keeps_separate_application_failure(output,
     assert 'private-browser-output' not in json.dumps(update)
 
 
+@pytest.mark.parametrize('tool, result, finding', [
+    ('web_search', {'success': True, 'data': {'web': [
+        {'title': 'private-title', 'url': 'https://example.invalid', 'description': 'private-snippet', 'position': 1},
+        {'title': 'private-title-two', 'url': 'https://example.invalid/2', 'description': '', 'position': 2},
+    ]}}, 'Pencarian web mengembalikan 2 hasil.'),
+    ('web_search', {'success': True, 'data': {'web': []}}, 'Pencarian web mengembalikan 0 hasil.'),
+    ('search_files', {'total_count': 15, 'matches_text': 'private-match', 'truncated': True,
+                      'total_count_is_lower_bound': True}, 'Pencarian file melaporkan setidaknya 15 hasil.'),
+    ('search_files', {'total_count': 4, 'files': ['private-result'], 'warning': 'private-diagnostic'},
+     'Pencarian file melaporkan 4 hasil dalam cakupan yang diperiksa.'),
+    ('read_file', {'content': '1|private-file-content', 'total_lines': 18, 'file_size': 300, 'truncated': True},
+     'Tool melaporkan panjang file 18 baris.'),
+    ('video_generate', {'success': True, 'video': '/private/render.mp4', 'prompt': 'private-prompt'},
+     'Tool menghasilkan video.'),
+    ('image_generate', {'success': True, 'image': 'https://example.invalid/private-signed-url'},
+     'Tool menghasilkan gambar.'),
+    ('video_generate', {'success': False, 'video': None, 'error_type': 'job_failed',
+                        'error': 'private-provider-diagnostic'}, 'Provider melaporkan pembuatan video gagal.'),
+])
+def test_native_tool_completion_exposes_only_verified_result_facts(tool, result, finding):
+    from gateway.run_turn_progress import _tool_complete_payload
+
+    event = {'type': 'tool.complete', 'session_id': PHOTO_WORK['session_id'], 'admission_id': PHOTO_WORK['admission_id'],
+             'execution_generation': 7, 'seq': 1, 'payload': _tool_complete_payload(
+                 'tool-1', tool, {}, json.dumps(result))}
+    live = live_agent._voice_tool_progress(event, PHOTO_WORK['session_id'], [PHOTO_WORK])
+    step = live_agent._public_tool_step(live)
+    assert step == {'tool': tool, 'detail': '', 'status': 'failed' if result.get('success') is False else 'completed',
+                    'finding': finding}
+    assert 'private-' not in json.dumps(live)
+    assert live_agent._voice_tool_progress(event, 'other-session', [PHOTO_WORK]) is None
+    assert live_agent._voice_tool_progress({**event, 'admission_id': 'b' * 32}, event['session_id'], [PHOTO_WORK]) is None
+
+
+@pytest.mark.parametrize('tool, result', [
+    ('web_search', {'data': {'web': []}}),
+    ('web_search', {'success': True, 'data': {'web': 'private-text'}}),
+    ('search_files', {'total_count': True}),
+    ('search_files', {'total_count': -1}),
+    ('read_file', {'content': '', 'total_lines': 0, 'file_size': 52, 'is_binary': True}),
+    ('image_generate', {'success': True, 'image': None}),
+    ('terminal', {'success': True, 'data': {'web': []}, 'total_count': 50, 'image': 'private-value'}),
+])
+def test_tool_without_verified_result_does_not_claim_a_finding(tool, result):
+    assert live_agent._tool_result_fields({'result': json.dumps(result)}, tool) == {'phase': 'completed'}
+
+
+@pytest.mark.parametrize('tool, result', [
+    ('video_generate', {'success': False, 'error_type': 'provider_exception', 'error': 'private provider response'}),
+    ('video_generate', {'success': False, 'error': 'private exception without a type'}),
+    ('image_generate', {'success': False, 'error_type': 'api_error', 'error': 'private user prompt'}),
+    ('web_search', {'success': False, 'error': 'private query from provider'}),
+    ('search_files', {'error': 'private search diagnostic', 'total_count': 0}),
+    ('read_file', {'error': 'private document diagnostic', 'user_summary': 'private explanation'}),
+    ('video_generate', 'private unstructured tool output'),
+])
+def test_native_tool_failure_keeps_exception_prose_out_of_voice_context(tool, result):
+    from gateway.run_turn_progress import _tool_complete_payload
+
+    serialized = result if isinstance(result, str) else json.dumps(result)
+    payload = _tool_complete_payload('test-call', tool, {}, serialized, is_error=True)
+    assert live_agent._tool_result_fields(payload, tool) == {'phase': 'failed'}
+
+
+@pytest.mark.parametrize('failure', [True, False])
+def test_native_truncated_tool_result_does_not_expose_its_raw_prefix(failure):
+    from gateway.run_turn_progress import _tool_complete_payload
+
+    payload = _tool_complete_payload('tool-1', 'browser_exec', {},
+                                     json.dumps({'error': 'private-body' * 7500}), is_error=failure)
+    assert live_agent._tool_result_fields(payload, 'browser_exec') == {'phase': 'failed' if failure else 'completed'}
+
+
 @pytest.mark.parametrize('raw_percent, expected_percent', [(37, 37), ('37%', None), (True, None), (131, None)])
 def test_native_tool_progress_preserves_only_valid_numeric_percent(raw_percent, expected_percent):
     event = {

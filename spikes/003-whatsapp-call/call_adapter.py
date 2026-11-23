@@ -7,6 +7,7 @@ import asyncio
 import base64
 from collections import deque
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 import hmac
 import json
 import os
@@ -15,6 +16,7 @@ import sys
 import time
 import uuid
 import wave
+from weakref import ref
 from fractions import Fraction
 from functools import partial
 from itertools import chain
@@ -59,7 +61,8 @@ CALL_PROMPT = (
     'Pakai progres dan hasil dari pekerjaan DM yang sama, termasuk saat membahas lampiran. '
     'Tetap tanggapi obrolan dan pertanyaan baru secara langsung selama pekerjaan berjalan. '
     'Jika pemilik bertanya tentang pekerjaan itu, ceritakan langkah yang sungguh sedang kamu kerjakan. '
-    'Ajukan delegasi hanya untuk permintaan atau pertanyaan yang memerlukan akses ke sesi WhatsApp atau alat. '
+    'Saat pemilik meminta tindakan yang perlu alat, ajukan delegasi ke client untuk giliran itu. '
+    'Sampaikan rencana sambil permintaan diproses. Katakan pekerjaan berjalan setelah ada konfirmasi dari sesi ini. '
     'Tanggapi pembahasan tentang kemungkinan mengulang pekerjaan sebagai percakapan. '
     'Mulai ulang pekerjaan saat pemilik meminta tindakan itu sekarang. '
     'Jika pemilik akun memilih agar hasil pekerjaan tetap di DM, teruskan pilihan itu ke client. '
@@ -101,6 +104,7 @@ WORK_STATUS_CONTEXT = {
     'failed': 'Pekerjaan berakhir tanpa hasil yang bisa dibacakan.',
 }
 WORK_OPEN_STATUSES = {'pending', 'queued', 'started', 'approval_required', 'clarification_required'}
+SUBMIT_REJECTIONS = {'attachment_unavailable', 'not_found', 'unavailable', 'unsupported_input'}
 WORK_UNCONFIRMED_CONTEXT = (
     'Status terbaru pekerjaan ini belum bisa dipastikan. Data progres sebelumnya tidak mengonfirmasi status sekarang.'
 )
@@ -133,6 +137,7 @@ PCM_SILENCE_PEAK = 16  # 16-bit PCM; covers the idle noise floor of the realtime
 # Use this estimate only to avoid muting a fresh response after a quiet gap.
 PLAYOUT_MARGIN_SECONDS = 0.6
 CALLER_CONTEXT_QUIET_SECONDS = 0.5
+CALLER_AUDIO_ASSOCIATION_SECONDS = 5  # Allow transcript lag after the last utterance, not indefinite idle PCM.
 CHAT_UPDATE_CHUNK_BYTES = 500
 RECENT_TOOL_STEPS = 12
 # Batch progress ticks from a running tool; start, failure and completion stay immediate.
@@ -260,7 +265,10 @@ def dm_delivery_context(result):
 
 def spoken_work_output(result, *, read_result=False):
     if not result.get('has_attachments'):
-        return result['output']
+        return (dm_delivery_context(result) + ' Status ini khusus untuk teks jawaban di DM pemilik. '
+                'Hasil ini tidak menyertakan tanda terima lampiran. Jika membahas pengiriman, gunakan '
+                'bukti dari layanan pengirim untuk berkas dan tujuan yang dimaksud. '
+                'Sampaikan isi jawaban berikut sesuai percakapan.\n' + result['output'])
     # A model-written caption can claim that the upload succeeded even when the
     # gateway subsequently rejected it. Only the transport can supply that fact.
     delivery = 'Hasil pekerjaan memuat lampiran. ' + dm_delivery_context(result)
@@ -800,7 +808,8 @@ class CodexConnection:
 
     async def start(self, prompt, initial_items):
         params = start_params(self.thread_id, self.peer.localDescription.sdp, self.voice)
-        params['prompt'] = prompt
+        # Hermes identity, DM history and call direction are already in initial_items.
+        # Leave the Codex session's own voice and delegation instructions in effect.
         params['initialItems'] = initial_items
         params['realtimeStartInstructions'] = 'Do not run tools. Reply only skip to backing delegations.'
         params['realtimeEndInstructions'] = ''
@@ -855,6 +864,16 @@ class CodexConnection:
             self.report['timings_seconds']['first_caller_nonzero_pcm_sent'] = round(self.track.first_nonzero_sent_at-self.call.began, 3)
 
 
+@dataclass
+class DirectReply:
+    reply_id: str
+    audio: AudioConnection
+    session_id: str
+    audible: asyncio.Future
+    decision: asyncio.Task | None = None
+    interrupted: bool = False
+
+
 class LiveCall:
     """The shared WhatsApp conversation, independent of its audio connection."""
 
@@ -882,7 +901,7 @@ class LiveCall:
         self.closed = False
         self.replace_voice = False
         self.previous_voice_results = None
-        self.tasks, self.delegations = [], set()
+        self.tasks, self.delegations = [], {}
         self.pending_ack = {}
         self.pending_deliveries = {}
         self.user_turns, self.delegated_turns = {}, set()
@@ -891,7 +910,13 @@ class LiveCall:
         self.reply_transcripts = {}
         self.finished_replies = set()
         self.deferred_handoffs = {}
-        self.routing_turns = set()
+        self.routing_turns = {}
+        self.heard_caller_turn = None
+        self.claimed_caller_voice_at = None
+        self.direct_reply = None
+        self.forwarded_before_reply = None
+        self.ambiguous_prior_playout = False
+        self.direct_routes = {}
         self.route_ready = asyncio.Event()
         self.loaded_context = ''
         self.dm_work = []
@@ -1572,6 +1597,8 @@ class LiveCall:
                 self.current_spoken_turn in self.pending_ack.values() and not self.result_acknowledged)
 
     def interrupt_reply(self):
+        self.expire_direct_route()
+        self.clear_direct_reply()
         if self.active_reply_turn:
             self.finished_audio_turn = self.active_reply_turn
             self.interrupted_replies.add(self.active_reply_turn)
@@ -1632,6 +1659,8 @@ class LiveCall:
             assistant, assistant_at_ms = ('', None) if shared or not assistant_turn else self.spoken_reply[assistant_turn]
             if not (user or assistant):
                 return
+            if assistant:
+                self.check_direct_reply(turn_id, assistant_turn)
             self.completed_exchanges.append(self.voice_exchange(
                 turn_id, assistant_turn, user, assistant, self.user_turn_at_ms.get(turn_id), assistant_at_ms,
             ))
@@ -1744,7 +1773,7 @@ class LiveCall:
         return 'saved'
 
     def finish_routing(self, turn_id):
-        self.routing_turns.discard(turn_id)
+        self.routing_turns.pop(turn_id, None)
         self.route_ready.set()
 
     def write_report(self):
@@ -1783,7 +1812,17 @@ class LiveCall:
                     if not self.spoken_turn_audio_started and not self.active_reply_turn and not self.assistant_reply_turn:
                         self.audio_ahead_of_turn = True
                     self.spoken_turn_audio_started = True
+            direct = self.direct_reply
+            caller = self.current_spoken_turn
+            ahead = audible and self.audio_ahead_of_turn and not self.ambiguous_prior_playout
             await self.send(audio_envelope(data))
+            if ahead and caller == self.current_spoken_turn:
+                # The data channel can identify the reply while the PCM send yields.
+                direct = self.direct_reply
+                if direct is None and self.audio_ahead_of_turn:
+                    self.forwarded_before_reply = caller
+            if audible and direct is not None and not direct.audible.done():
+                direct.audible.set_result(True)
             if audible and self.pending_end_call and self.assistant_reply_turn:
                 self.farewell_audio_sent = True
                 await self.end_after_farewell()
@@ -1811,6 +1850,9 @@ class LiveCall:
             if sum(s * s for s in samples) > len(samples) * 4 ** 2:
                 self.caller_audio_since_turn = True
                 self.last_caller_voice_at = asyncio.get_running_loop().time()
+                if self.current_spoken_turn and not self.spoken_turn_final:
+                    self.heard_caller_turn = self.current_spoken_turn
+                    self.claimed_caller_voice_at = self.last_caller_voice_at
 
     def cancel_end_call(self):
         self.farewell_audio_sent = self.farewell_transcribed = False
@@ -1932,7 +1974,17 @@ class LiveCall:
             self.last_speech_activity = asyncio.get_running_loop().time()
             if user and identified:
                 started = turn_id not in self.user_turns
+                if (not history_only and (started or turn_id == self.current_spoken_turn)
+                        and self.caller_audio_since_turn and self.last_caller_voice_at is not None
+                        and self.last_caller_voice_at != self.claimed_caller_voice_at
+                        and self.last_speech_activity - self.last_caller_voice_at <= CALLER_AUDIO_ASSOCIATION_SECONDS):
+                    self.heard_caller_turn = turn_id
+                    self.claimed_caller_voice_at = self.last_caller_voice_at
                 if started:
+                    self.expire_direct_route()
+                    self.clear_direct_reply()
+                    self.ambiguous_prior_playout = kind == 'turn.done' and bool(
+                        self.active_reply_turn or self.playout_expected_until > self.last_speech_activity)
                     if not history_only:
                         if self.muted_reply_turn:
                             self.interrupted_output_until = float('inf')
@@ -2014,6 +2066,10 @@ class LiveCall:
                 self.speakable_handoff_until = 0.0
                 self.reply_transcripts[turn_id] = text.strip()
                 self.finished_audio_turn = None
+                pcm_before_turn = (self.current_spoken_turn is not None
+                                   and self.forwarded_before_reply == self.current_spoken_turn)
+                self.clear_direct_reply()
+                self.ambiguous_prior_playout = False
                 self.audio_ahead_of_turn = False
                 preview = self.work_preview_start
                 self.work_preview_start = None
@@ -2028,6 +2084,13 @@ class LiveCall:
                 self.latest_reply_turn = turn_id
                 if not (preview_may_start or self.result_acknowledged or self.result_speech_start_deadline is not None):
                     self.assistant_reply_turn = turn_id
+                    if (isinstance(self.connection, CodexConnection) and self.hermes_session_id
+                            and self.current_spoken_turn not in self.delegated_turns
+                            and self.current_spoken_turn not in self.direct_routes):
+                        self.direct_reply = DirectReply(turn_id, self.audio, self.hermes_session_id,
+                                                        asyncio.get_running_loop().create_future())
+                        if pcm_before_turn:
+                            self.direct_reply.audible.set_result(True)
                 self.result_speech_start_deadline = None
             elif kind == 'turn.done' and identified:
                 if turn_id == self.active_reply_turn or self.audio_ahead_of_turn:
@@ -2088,7 +2151,7 @@ class LiveCall:
             if not isinstance(item_id, str) or not item_id:
                 self.fail('Delegation missing correlation ID')
             elif item_id not in self.delegations:
-                self.delegations.add(item_id)
+                self.delegations[item_id] = ref(self.audio)
                 turn_id = item.get('user_bidi_turn_id')
                 if (isinstance(turn_id, str) and turn_id
                         and turn_id not in self.delegated_turns and self.agent_jobs is not None
@@ -2125,17 +2188,114 @@ class LiveCall:
                 acknowledgment.set_result(None)
 
     def start_handoff(self, item, turn_id, *, released_early=False):
-        async def route_turn():
-            try:
-                await self.handoff(item, turn_id, released_early=released_early)
-            finally:
+        self.start_routing(turn_id, self.handoff(item, turn_id, released_early=released_early,
+                                                direct=self.direct_routes.get(turn_id)))
+
+    def start_routing(self, turn_id, operation):
+        def release(finished):
+            if self.routing_turns.get(turn_id) is finished:
                 self.finish_routing(turn_id)
 
-        if task := self.spawn(route_turn()):
-            self.routing_turns.add(turn_id)
-            task.add_done_callback(lambda finished: finished.cancelled() and self.finish_routing(turn_id))
+        if task := self.spawn(operation):
+            self.routing_turns[turn_id] = task
+            task.add_done_callback(release)
 
-    async def handoff(self, item, turn_id, *, released_early=False):
+    def check_direct_reply(self, turn_id, reply_id):
+        direct = self.direct_reply
+        if (direct is None or direct.reply_id != reply_id or not self.direct_request_current(turn_id, direct)
+                or turn_id != self.heard_caller_turn or turn_id in self.delegated_turns
+                or turn_id in self.direct_routes or not callable(getattr(self.agent_jobs, 'route', None))):
+            return
+        self.direct_routes[turn_id] = direct
+        self.start_routing(turn_id, self.recover_direct_request(turn_id, direct))
+
+    def clear_direct_reply(self):
+        if self.direct_reply is not None and not self.direct_reply.audible.done():
+            self.direct_reply.audible.set_result(False)
+            if (self.direct_routes.get(self.current_spoken_turn) is self.direct_reply
+                    and self.current_spoken_turn not in self.delegated_turns):
+                self.direct_routes.pop(self.current_spoken_turn)
+        self.direct_reply = None
+        self.forwarded_before_reply = None
+
+    def expire_direct_route(self):
+        turn_id = self.current_spoken_turn
+        direct = self.direct_routes.pop(turn_id, None)
+        if direct is None:
+            return
+        direct.interrupted = True
+        if turn_id not in self.delegated_turns:
+            # Preserve only the turn ID for delayed provider proposals. Accepted
+            # submissions and real handoffs have their own lifetime.
+            self.delegated_turns.add(turn_id)
+            if task := self.routing_turns.get(turn_id):
+                task.cancel()
+
+    def direct_request_current(self, turn_id, direct):
+        return (self.current_spoken_turn == turn_id and self.hermes_session_id == direct.session_id
+                and direct.audio.active and not direct.audio.failed.is_set() and not direct.interrupted
+                and not (self.closed or self.failed.is_set() or self.chat_reconnecting
+                         or self.pending_end_call or self.end_call_sent))
+
+    async def recover_direct_request(self, turn_id, direct):
+        if not await direct.audible or turn_id in self.delegated_turns or not self.direct_request_current(turn_id, direct):
+            return
+        request = self.user_turns[turn_id].strip()
+        decision = await self.route_voice_turn(turn_id, '', request, direct=direct)
+        if turn_id in self.delegated_turns or not self.direct_request_current(turn_id, direct):
+            # The genuine provider handoff owns the same pending decision and transcript.
+            return
+        if decision.get('status') == 'session_changed':
+            self.session_changed()
+            return
+        if decision.get('status') != 'task':
+            return
+        self.delegated_turns.add(turn_id)
+        direct.decision = None
+        await self.run_voice_task(None, turn_id, request, True, attachment_admission_id=decision.get('admission_id'),
+                                  direct=direct)
+
+    async def route_voice_turn(self, turn_id, proposal, request, *, direct=None):
+        route = direct.decision if direct else None
+        if route is None:
+            previous = ''
+            for key, spoken in self.user_turns.items():
+                if key == turn_id:
+                    break
+                previous = spoken
+            loaded = '\n'.join((self.loaded_context, self.last_spoken_exchange))
+            route = self.agent_jobs.route(proposal[:12000], request[:12000], previous[-12000:], loaded.strip(),
+                                          session_id=self.hermes_session_id)
+            if direct is not None:
+                route = asyncio.create_task(route)
+                direct.decision = route
+        try:
+            decision = await route
+        except Exception:
+            if direct is None:
+                raise
+            return {'status': 'unavailable'}
+        if direct is not None:
+            if not isinstance(decision, dict) or not isinstance(decision.get('status'), str):
+                return {'status': 'unavailable'}
+            work = decision.get('work', self.dm_work)
+            if (not isinstance(work, list) or not all(isinstance(row, dict) and
+                    ('attachment' not in row or row['attachment'] is True) and
+                    all(isinstance(row.get(key), str) for key in ('session_id', 'admission_id', 'status'))
+                    for row in work)):
+                return {'status': 'unavailable'}
+            if decision['status'] == 'recall' and not isinstance(decision.get('terms'), list):
+                return {'status': 'unavailable'}
+        attachment_id = decision.get('admission_id')
+        if decision.get('status') == 'task' and attachment_id is not None and not any(
+            entry.get('session_id') == self.hermes_session_id and entry['admission_id'] == attachment_id
+            and entry.get('attachment') and entry['status'] == 'completed'
+            for entry in decision.get('work', self.dm_work)
+        ):
+            decision = {**decision, 'status': 'attachment'}
+        return decision
+
+    async def handoff(self, item, turn_id, *, released_early=False, direct=None):
         # Synero Hermes Live Voice uses this proposal/append transport. A proposal
         # can be the speech itself and is not evidence that Hermes work is needed.
         item_id = item['id']
@@ -2163,6 +2323,9 @@ class LiveCall:
             if not released_early:
                 await self.append_handoff(item_id, quiet, channel='commentary')
             return
+        if direct is not None and not self.direct_request_current(turn_id, direct):
+            await self.append_handoff(item_id, quiet, channel='commentary')
+            return
         if self.chat_reconnecting:
             await self.append_handoff(
                 item_id, 'Status pekerjaan belum bisa dipastikan karena sambungan ke sesi sedang dipulihkan.',
@@ -2173,15 +2336,12 @@ class LiveCall:
             part['text'] for part in item.get('content') or []
             if isinstance(part, dict) and isinstance(part.get('text'), str)
         ).strip()
-        previous = ''
-        for key, spoken in self.user_turns.items():
-            if key == turn_id:
-                break
-            previous = spoken
-        loaded = '\n'.join((self.loaded_context, self.last_spoken_exchange))
-        decision = await self.agent_jobs.route(proposal[:12000], request[:12000],
-                                              previous[-12000:], loaded.strip(),
-                                              session_id=self.hermes_session_id)
+        decision = await self.route_voice_turn(turn_id, proposal, request, direct=direct)
+        if direct is not None:
+            direct.decision = None
+        if direct is not None and not self.direct_request_current(turn_id, direct):
+            await self.append_handoff(item_id, quiet, channel='commentary')
+            return
         action = decision.get('status')
         if action == 'session_changed':
             self.session_changed()
@@ -2189,14 +2349,9 @@ class LiveCall:
         work = [entry for entry in decision.get('work', self.dm_work)
                 if entry.get('session_id') == self.hermes_session_id]
         admission_id = decision.get('admission_id')
-        if action == 'task' and admission_id is not None and not any(
-            entry['admission_id'] == admission_id and entry.get('attachment') and entry['status'] == 'completed'
-            for entry in work
-        ):
-            action = 'attachment'
         if action == 'task':
             await self.run_voice_task(item_id, turn_id, request, released_early,
-                                      attachment_admission_id=admission_id)
+                                      attachment_admission_id=admission_id, direct=direct)
         elif action in {'follow', 'steer', 'dm_only', 'delivery_status', 'code_changes', 'speak_result', 'attachment', 'status'}:
             if (action in {'follow', 'steer', 'dm_only', 'delivery_status', 'code_changes', 'speak_result'}
                     and any(entry['admission_id'] == admission_id for entry in work)):
@@ -2257,7 +2412,7 @@ class LiveCall:
                 if action == 'speak_result':
                     self.dm_only_results.discard(admission_id)
                 await self.follow_dm_work(item_id, turn_id, admission_id, released_early,
-                                          correction=request[:12000] if action == 'steer' else None)
+                                          correction=request[:12000] if action == 'steer' else None, direct=direct)
             else:
                 await self.append_handoff(item_id, 'Aku belum bisa memastikan pekerjaan yang kamu maksud.',
                                           channel='speakable' if turn_id == self.current_spoken_turn else 'commentary')
@@ -2273,7 +2428,7 @@ class LiveCall:
                 # The signed Hermes turn keeps the caller's exact words. The current call owns
                 # the hangup, and a durable admission lets the work outlive the audio connection.
                 self.native_task_turns.add(turn_id)
-                result = await self.submit_task(item_id, turn_id, request, closing_work=new_work)
+                result = await self.submit_task(item_id, turn_id, request, closing_work=new_work, direct=direct)
                 if result is None or turn_id != self.current_spoken_turn:
                     return
                 text, status, admitted = result
@@ -2314,6 +2469,10 @@ class LiveCall:
                 await self.append_handoff(item_id, quiet, channel='commentary')
 
     async def append_handoff(self, item_id, text, *, channel='speakable', audio_turn=None):
+        audio = self.audio
+        origin = self.delegations.get(item_id)
+        if audio is None or not audio.active or audio.failed.is_set() or (origin is not None and origin() is not audio):
+            return False
         acknowledgment = asyncio.get_running_loop().create_future()
         self.pending_deliveries[item_id] = acknowledgment
         if audio_turn is not None:
@@ -2323,9 +2482,9 @@ class LiveCall:
                 self.waiting_for_caller = False
                 # The acknowledgment of the instruction can come before its audio or turn ID.
                 self.speakable_handoff_until = asyncio.get_running_loop().time() + RESULT_ACK_TIMEOUT
-            self.connection.send_handoff(item_id, text[:AGENT_OUTPUT_LIMIT], channel)
+            audio.link.send_handoff(item_id, text[:AGENT_OUTPUT_LIMIT], channel)
             await asyncio.wait_for(acknowledgment, RESULT_ACK_TIMEOUT)
-            return True
+            return audio.active and not audio.failed.is_set()
         except OSError as exc:
             self.pending_ack.pop(item_id, None)
             self.pending_deliveries.pop(item_id, None)
@@ -2333,7 +2492,7 @@ class LiveCall:
             self.report.setdefault(key, []).append(item_id)
             return False
 
-    async def follow_dm_work(self, item_id, turn_id, admission_id, released_early, *, correction=None):
+    async def follow_dm_work(self, item_id, turn_id, admission_id, released_early, *, correction=None, direct=None):
         if correction is None:
             self.shared_work_turns.add(turn_id)
         self.call_work.add(admission_id)
@@ -2343,6 +2502,8 @@ class LiveCall:
                 channel='commentary',
             ):
                 item_id = None
+        if direct is not None and not self.direct_request_current(turn_id, direct):
+            return
         if correction is not None:
             update = await self.agent_jobs.steer_work(self.hermes_session_id, admission_id, correction)
             if update.get('status') != 'not_running':
@@ -2583,17 +2744,19 @@ class LiveCall:
                     return
                 await asyncio.sleep(.1)
 
-    async def run_voice_task(self, item_id, turn_id, request, released_early, *, attachment_admission_id=None):
-        # A lost submit reply can hide a durable admission. Hold its potential
-        # transcript mirror until a definite pre-admission rejection is known.
-        self.native_task_turns.add(turn_id)
-        submit = self.submit_task(item_id, turn_id, request, attachment_admission_id=attachment_admission_id)
+    async def run_voice_task(self, item_id, turn_id, request, released_early, *, attachment_admission_id=None,
+                             direct=None):
+        submit = self.submit_task(item_id, turn_id, request, attachment_admission_id=attachment_admission_id,
+                                  direct=direct)
         # Codex can begin its direct reply after the early transcript acknowledgment,
         # before either its PCM or its turn.created event reaches the adapter.
         reply_released = released_early and isinstance(self.connection, CodexConnection)
         launch_requested = (not reply_released and turn_id == self.current_spoken_turn
                             and not (self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started))
-        if launch_requested or not released_early:
+        if item_id is None:
+            result = await submit
+            acknowledged = False
+        elif launch_requested or not released_early:
             result, acknowledged = await asyncio.gather(
                 submit,
                 self.append_handoff(
@@ -2612,7 +2775,11 @@ class LiveCall:
         if status == 'completed':
             await self.present_work_result(item_id if acknowledged else None, turn_id, admission_id, text)
             return
-        if acknowledged:
+        if direct is not None:
+            if status in SUBMIT_REJECTIONS and self.direct_request_current(turn_id, direct):
+                quoted = json.dumps(request[:400], ensure_ascii=False)
+                await self.append_chat_context([f'Hasil pengajuan untuk ucapan pemilik {quoted}: {text}'])
+        elif acknowledged:
             current = turn_id == self.current_spoken_turn
             provisional = admission_id is not None and status in {'pending', 'queued', 'started', 'unknown'}
             already_replied = self.assistant_reply_turn or self.spoken_reply or self.spoken_turn_audio_started
@@ -2641,7 +2808,9 @@ class LiveCall:
             return ''
         return 'Bila detailnya belum tersedia, minta petunjuk singkat.'
 
-    async def submit_task(self, item_id, turn_id, request, *, attachment_admission_id=None, closing_work=None):
+    async def submit_task(self, item_id, turn_id, request, *, attachment_admission_id=None, closing_work=None,
+                          direct=None):
+        session_id = self.hermes_session_id
         submission_id = self.submission_id(turn_id)
         call_context = {'direction': self.call_direction} if self.call_direction is not None else {}
         if turn_id in self.user_turn_at_ms:
@@ -2666,16 +2835,35 @@ class LiveCall:
                 'Pemutusan panggilan ditangani oleh telepon. Biarkan pekerjaan yang sudah berjalan berlanjut. '
                 'Kerjakan permintaan baru ini dari ucapan pemilik: ' + json.dumps(closing_work, ensure_ascii=False)
             ).strip()[-6000:]
-        result = await self.agent_jobs.submit(submission_id, request, session_id=self.hermes_session_id,
-                                              **call_context)
+        if direct and not self.direct_request_current(turn_id, direct):
+            return None
+        # Once submit starts, a lost reply can hide a durable admission. Keep
+        # the transcript mirror out of history until the gateway proves rejection.
+        self.native_task_turns.add(turn_id)
+        try:
+            result = await self.agent_jobs.submit(submission_id, request, session_id=session_id, **call_context)
+        except (OSError, ValueError):
+            if direct is None:
+                raise
+            result = {'status': 'unknown'}
+        if not isinstance(result, dict):
+            result = {'status': 'unknown'}
         status = result.get('status')
         if status == 'session_changed':
             self.session_changed()
             return None
         receipt = result.get('receipt')
         admission_id = receipt.get('admission_id') if isinstance(receipt, dict) and (
-            receipt.get('session_id') == self.hermes_session_id and isinstance(receipt.get('admission_id'), str)
+            receipt.get('session_id') == session_id and isinstance(receipt.get('admission_id'), str)
         ) else None
+        if direct and admission_id and not re.fullmatch(r'[0-9a-f]{32}', admission_id):
+            admission_id = None
+        if direct and status == 'completed' and not isinstance(result.get('output'), str):
+            status = 'unknown'
+        if not isinstance(status, str):
+            status = 'unknown'
+        if direct and not admission_id and status not in SUBMIT_REJECTIONS:
+            status = 'unknown'
         if admission_id and status in WORK_OPEN_STATUSES | {'unknown', 'completed'}:
             # The native receipt survives a lost or replaced Codex peer.
             self.call_work.add(admission_id)
@@ -2688,8 +2876,9 @@ class LiveCall:
             follower = self.work_followers.get(admission_id)
             if admission_id in self.offered_work_results or (follower is not None and not follower[0].done()):
                 return None
-            self.report['backend_completed_delegations'].append(item_id)
-            self.report.setdefault('agent_receipts', {})[item_id] = {'admission_id': admission_id}
+            if item_id is not None:
+                self.report['backend_completed_delegations'].append(item_id)
+                self.report.setdefault('agent_receipts', {})[item_id] = {'admission_id': admission_id}
             return ('Gunakan isi hasil yang tersedia untuk menjawab dengan wajar dan ringkas. '
                     'Lewati status antre atau progres yang sudah berlalu. '
                     'Kalau pemilik akun meminta hasil lengkap, bacakan bagian yang tersedia tanpa mengarang.\n'

@@ -172,11 +172,6 @@ def start_params(thread_id, offer, voice):
         'clientManagedHandoffs': True, 'includeStartupContext': False,
         'flushTranscriptTailOnSessionEnd': False,
         'delegationAckFiller': False,
-        'prompt': (
-            'Kamu adalah asisten dalam panggilan WhatsApp ini. Bicara bahasa Indonesia santai, pakai aku/kamu. '
-            'Ini hanya uji suara singkat. Tunggu ucapan pengguna, lalu jawab pertanyaannya '
-            'langsung dalam satu kalimat pendek. Tidak perlu menyapa dulu atau menjalankan task.'
-        ),
     }
 
 
@@ -406,8 +401,11 @@ async def run_probe(input_path, output_dir, *, timeout=55, voice='cove', handoff
             await peer.setLocalDescription(await peer.createOffer())
             start_attempted = True
             params = start_params(thread_id, peer.localDescription.sdp, voice)
-            if realtime_prompt is not None:
-                params['prompt'] = realtime_prompt
+            params['prompt'] = realtime_prompt if realtime_prompt is not None else (
+                'Kamu adalah asisten dalam panggilan WhatsApp ini. Bicara bahasa Indonesia santai, pakai aku/kamu. '
+                'Ini hanya uji suara singkat. Tunggu ucapan pengguna, lalu jawab pertanyaannya '
+                'langsung dalam satu kalimat pendek. Tidak perlu menyapa dulu atau menjalankan task.'
+            )
             if handoff is not None:
                 params['realtimeStartInstructions'] = (
                     'The client executes every task through Hermes. On a realtime_delegation, '

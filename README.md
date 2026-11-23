@@ -49,6 +49,12 @@ disimpan lewat mekanisme secret Hermes. Lihat kesiapan dengan
 ### Pilih provider Live
 
 Tanpa pengaturan `live`, plugin memakai login Codex yang sudah tersedia.
+Pada panggilan Codex, bila suara sudah menjawab langsung dan belum ada delegasi,
+plugin memakai model Hermes untuk memeriksa maksud ucapan final pemilik. Ini
+dapat memakai token tambahan, termasuk saat mengobrol biasa. Pemeriksaan
+berjalan sambil audio tetap aktif. Pekerjaan yang diterima memakai sesi DM
+WhatsApp yang sedang dibuka.
+
 Untuk memakai provider lain atau pool, tambahkan blok berikut di bawah
 `plugins.entries.wa-control-live.settings` pada profil Hermes yang sama.
 

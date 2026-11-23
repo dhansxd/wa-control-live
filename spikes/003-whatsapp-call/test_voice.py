@@ -90,8 +90,26 @@ def test_phone_start_requests_juniper_without_changing_subscription_route(tmp_pa
     assert params['voice'] == 'juniper', 'The phone still requests the old masculine voice'
     assert params['transport'] == {'type': 'webrtc', 'sdp': 'fixture-offer-sdp'}
     assert params['clientManagedHandoffs'] is True
+    # A top-level prompt replaces the native Codex voice instructions in full.
+    assert 'prompt' not in params
     thread = next(params for method, params in requests if method == 'thread/start')
     assert thread['modelProvider'] == 'openai'
+
+
+@pytest.mark.parametrize(('receipt', 'fact'), [
+    ('sent', 'Teks hasil sudah dikirim ke DM.'),
+    ('pending', 'Pengiriman teks hasil ke DM masih dalam proses.'),
+    (None, 'Pengiriman hasil di DM belum terkonfirmasi.'),
+])
+def test_spoken_text_result_distinguishes_sender_evidence_from_what_the_answer_claims(receipt, fact):
+    # A text-only final may claim it sent a picture even though it carried no file.
+    result = {'output': 'Warna jas hujannya kuning. Fotonya sudah sampai.', 'has_attachments': False}
+    if receipt:
+        result['text_delivery'] = receipt
+    context = adapter.spoken_work_output(result)
+    assert fact in context
+    assert 'tanda terima lampiran' in context
+    assert result['output'] in context  # Keep the useful result available to the voice model.
 
 
 @pytest.mark.parametrize('session_id', ['same-dm', 'new-dm'])
@@ -136,9 +154,8 @@ def test_phone_identity_and_language_reach_initial_developer_context(tmp_path, m
     assert 'Lanjutkan percakapan DM WhatsApp dengan pemilik akun lewat telepon ini.' in identity
     assert 'Minta persetujuan atau penjelasan hanya jika pekerjaan memang membutuhkannya.' in identity
     assert 'pesan suara yang dikirim ke DM' in identity
-    assert identity == params['prompt']
-    assert 'Untrusted facade persona' not in params['prompt']
-    assert 'coba tugas catatan uji' not in params['prompt'].lower()
+    assert 'Untrusted facade persona' not in identity
+    assert 'coba tugas catatan uji' not in identity.lower()
     assert params['includeStartupContext'] is False
 
 
@@ -153,8 +170,8 @@ def test_phone_initial_context_uses_sidecar_call_direction(tmp_path, monkeypatch
 
     requests = asyncio.run(start_phone(tmp_path, monkeypatch, direction_reader=read_direction))
     params = next(params for method, params in requests if method == 'thread/realtime/start')
-    assert opening in params['prompt']
-    assert params['initialItems'][-1] == {'role': 'developer', 'text': params['prompt']}
+    assert params['initialItems'][-1]['role'] == 'developer'
+    assert opening in params['initialItems'][-1]['text']
 
 
 @pytest.mark.parametrize(('ended_at', 'expected'), [(None, 'outbound'), (123, None)])
@@ -236,7 +253,7 @@ def test_phone_loads_bound_chat_and_keeps_opening_on_topic(tmp_path, monkeypatch
         {'role': 'user', 'text': 'Kita bahas Sakura lewat telepon.', 'source': 'whatsapp_call'},
         {'role': 'assistant', 'text': 'Aku sudah baca Sakura.'},
     ]
-    assert identity == {'role': 'developer', 'text': params['prompt']}
+    assert identity['role'] == 'developer'
     opening = identity['text']
     assert opening.startswith('Namaku Nara di chat.\n\n')
     assert adapter.FALLBACK_PERSONA not in opening
