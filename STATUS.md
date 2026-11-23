@@ -19,6 +19,58 @@ Untuk melanjutkan pengembangan, buka [handoff](HANDOFF.md),
 
 ## Hasil verifikasi
 
+### Penerimaan tugas setelah jawaban langsung Codex (23 November 2026)
+
+Dengan kode dasar `cfbb3f1`, transkrip final permintaan foto dan jawaban suara
+yang menjanjikan tindakan bisa tersimpan tanpa satu pun pengajuan ke Hermes.
+Kandidat memakai instruksi dasar Codex dan menyampaikan persona serta konteks
+WhatsApp melalui item developer yang sudah ada. Jika Codex menjawab langsung
+dan melewatkan delegasi, plugin memeriksa ucapan final pemilik dengan model
+klasifikasi Hermes. Pemeriksaan ini memakai model tambahan pada giliran yang
+memenuhi kondisi, termasuk obrolan biasa. Sebelum pengajuan baru, ia memeriksa
+giliran, koneksi, dan sesi yang sedang aktif. Delegasi terlambat memakai jalur
+penerimaan yang sama. Interupsi suara tetap membiarkan tugas yang sudah
+diterima Hermes berjalan.
+
+- Fixture `test_whatsapp_cold_delivery.py` memakai profil Hermes sementara
+  dan sesi DM yang sudah ada. Pada `cfbb3f1`, empat skenario lama lulus dan
+  dua skenario jawaban tanpa delegasi menghasilkan nol tugas. Pada kandidat,
+  tiap skenario menghasilkan satu tugas pada DM asal. Panggilan tetap terbuka
+  ketika pengirim HTTP lokal menerima teks dan gambar. Respons 200 memberi
+  tanda terima gambar diterima dan respons 422 memberi tanda terima ditolak.
+  Model, lawan bicara, pembuat gambar, dan penerima WhatsApp disimulasikan.
+- Dalam panggilan WebRTC ke Codex menggunakan suara sintetis, pertanyaan
+  tentang identitas dijawab “Hermes” tanpa pengajuan tugas. Permintaan foto
+  menghasilkan satu delegasi, satu keputusan tugas oleh model klasifikasi
+  profil, dan satu pengajuan ke penerima uji. Dua permintaan sintetis lain
+  yang berisi larangan atau pertanyaan hipotetis menghasilkan keputusan
+  percakapan. Tidak ada gambar dibuat atau dikirim ke akun pemilik.
+- Suara kini mendapat fakta dari hasil alat, misalnya jumlah hasil pencarian
+  atau kegagalan render yang dilaporkan provider. Pesan layanan pengirim
+  membedakan pengiriman teks dan lampiran. Hermes v0.23.2 tidak selalu
+  menerbitkan progres di tengah satu alat pada rute WhatsApp. Plugin dapat
+  melaporkan langkah yang sudah diketahui dan menerima temuan berikutnya
+  ketika tersedia.
+- Fixture regresi yang sama memeriksa Control, indikator mengetik, sesi,
+  interupsi, dan penutupan. Sebanyak 64 kasus perilaku lama lulus pada
+  `907e804`, `cfbb3f1`, dan `ea75123`. Tujuh pemeriksaan tambahan untuk
+  penerimaan dan pengiriman lampiran lulus pada `cfbb3f1` dan `ea75123`.
+- Pada `ea75123`, 903 tes Python dan 17 subtes lulus. Pengujian delegasi
+  dan pergantian provider mencakup 143 kasus lama yang juga lulus pada
+  `cfbb3f1`, serta 48 kasus pemulihan. Saat dua belas giliran suara
+  berturut-turut mengganti giliran sebelumnya, satu klasifikasi tetap aktif.
+  Saat provider berganti di tengah klasifikasi, koneksi baru tidak menerima
+  konfirmasi yang ditujukan ke koneksi lama.
+- Pemeriksaan sintaks bridge dan tujuh tes Node lulus. Pada sumber sidecar
+  yang sama dengan rilis, 93 tes Rust lulus dan tujuh dilewati.
+
+Lingkungan perbandingan adalah macOS arm64, Python 3.12.15, Hermes v0.23.2
+`ae2a81ccc0` dan Codex CLI 0.171.0. Jeda suara yang sempat terjadi pada
+panggilan pemilik dan kesetaraan penuh dengan ChatGPT Desktop masih belum
+terverifikasi pada perangkat.
+
+### Snapshot terdahulu
+
 Regresi kandidat sebelum publikasi lulus **680 tes Python, 15 subtes,
 92 tes Rust, dan 5 tes Baileys**. Tes mencakup unit, koneksi loopback, profil
 Hermes v0.23.1 terisolasi, dan simulasi telepon. Tujuh tes Rust yang memerlukan

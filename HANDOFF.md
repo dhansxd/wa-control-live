@@ -27,11 +27,11 @@ Contoh permintaan dari root repo:
 
 ## Baseline yang terakhir diuji
 
-- Snapshot kode publik yang diperiksa adalah
-  [`9f9992575468a6935fdf0490209b0836b8313e90`](https://github.com/dhansxd/wa-control-live/commit/9f9992575468a6935fdf0490209b0836b8313e90).
-  Regresi kandidat mencatat 680 tes Python, 15 subtes, 92 tes Rust, dan 5 tes
-  Baileys lulus. Regresi Python dan Baileys dijalankan ulang pada snapshot
-  publik. Rincian hasil dan batas verifikasi tercatat di [STATUS.md](STATUS.md#hasil-verifikasi).
+- Pada [`ea75123`](https://github.com/dhansxd/wa-control-live/commit/ea75123),
+  permintaan tindakan yang dijawab langsung oleh Codex dapat masuk ke sesi
+  WhatsApp Hermes yang aktif. Uji regresi membandingkan kandidat dengan
+  `cfbb3f1` dan perilaku yang sudah ada pada `907e804`. Lihat
+  [hasil, lingkungan uji, dan batas verifikasi](STATUS.md#hasil-verifikasi).
 - Instalasi publik, registrasi perintah setup, disable, enable, dan remove
   diverifikasi di profil Hermes v0.23.1 sementara. Kandidat berikutnya
   berhasil membangun sidecar release arm64 dan menjalankan regresi
