@@ -46,6 +46,17 @@ timer salam penutup, pembatalan oleh audio susulan, atau sinyal ke model.
 Fixture penggantinya memeriksa penutupan oleh transport, kelanjutan pekerjaan
 dan pengakuan asli Hermes untuk permintaan gabungan seperti jadwal telepon balik.
 
+Saat verifikasi dari instalasi GitHub `25aa31e`, Codex pernah mengirim
+seluruh fragmen “Hermes, hang up the phone” dan mengakui delegasi, tetapi
+`turn.done` tidak tiba selama jendela 34 detik. Rilis 0.2.1 mengadopsi
+timer ucapan stabil Hermes Desktop untuk frasa penutup. Replay audio dan
+event sintetis yang sama menghasilkan nol perintah putus pada 0.2.0 dan
+tepat satu pada 0.2.1. Dalam panggilan kedua ke provider asli tanpa
+`turn.done`, kandidat mengirim satu perintah putus dan nol tugas. Rilis
+0.2.1 lulus 981 tes Python dan 17 subtes pada lingkungan yang sama.
+Tugas selain penutupan tetap memakai ucapan final pemilik. Jika provider
+berhenti pada fragmen, operasi seperti pengiriman pesan belum dijalankan.
+
 Uji integrasi gambar menjalankan gateway dan penerimaan tugas Hermes asli
 dengan model dan transport WhatsApp lokal yang disimulasikan. Uji audio memakai
 suara sintetis dan akun Codex, tanpa menelepon kontak. Pembandingan langsung

@@ -107,6 +107,7 @@ TOOL_PROGRESS_INTERVAL = 0.25
 VOICE_HISTORY_FLUSH_TIMEOUT = 1.5
 DIAGNOSTIC_AUDIO_SECONDS = 180
 POST_ACK_TRANSCRIPT_WAIT = 3
+UTTERANCE_SETTLE_SECONDS = 1.5  # Hermes Desktop UTTERANCE_SETTLE_MS.
 LIVE_SETUP_TIMEOUT = 14
 RECOVERY_NOTICE_DELAY = 1.5
 
@@ -950,6 +951,7 @@ class LiveCall:
         self.pending_end_call = None
         self.end_call_sent = None
         self.stop_phrases = DEFAULT_STOP_PHRASES
+        self.partial_stop = None
         if routing is None:
             self.install_audio(AudioConnection(self, connection_factory))
         self.recording = wave.open(str(self.path/'reply.wav'), 'wb')
@@ -1838,7 +1840,34 @@ class LiveCall:
                     or self.current_spoken_turn not in self.audio.heard_caller_turns
                 )
 
-    async def end_on_stop_phrase(self, turn_id, text):
+    def consider_partial_stop(self, turn_id):
+        if self.partial_stop is not None:
+            self.partial_stop.cancel()
+            self.partial_stop = None
+        words = self.user_turns.get(turn_id)
+        if (isinstance(self.connection, CodexConnection) and self.hermes_session_id
+                and turn_id == self.heard_caller_turn == self.current_spoken_turn
+                and words and is_stop_command(words, self.stop_phrases)):
+            self.partial_stop = self.audio.spawn(
+                self.settle_partial_stop(self.audio, self.hermes_session_id, turn_id, words)
+            )
+
+    async def settle_partial_stop(self, audio, session_id, turn_id, words):
+        # Desktop checks the whole utterance after its fragments settle: Codex
+        # can ACK a delegation yet never emit turn.done for a spoken stop.
+        loop = asyncio.get_running_loop()
+        last_fragment = loop.time()
+        while (audio.active and not audio.failed.is_set() and self.hermes_session_id == session_id
+                and not self.failed.is_set() and not self.end_call_sent
+                and self.current_spoken_turn == turn_id and self.user_turns.get(turn_id) == words
+                and not audio.pending_caller_transcript and not self.transcripts_done[turn_id].is_set()):
+            delay = max(last_fragment, self.last_caller_voice_at or last_fragment) + UTTERANCE_SETTLE_SECONDS - loop.time()
+            if delay <= 0:
+                await self.end_on_stop_phrase(turn_id, words, locally_settled=True)
+                return
+            await asyncio.sleep(delay)
+
+    async def end_on_stop_phrase(self, turn_id, text, *, locally_settled=False):
         # A bare "cancel" can address an existing job. Preserve native intent
         # routing until the owner names the call or has set a custom stop phrase.
         work_pending = (any(key != turn_id for key in self.routing_turns)
@@ -1847,18 +1876,19 @@ class LiveCall:
         if (self.hermes_session_id and turn_id == self.heard_caller_turn
                 and turn_id == self.current_spoken_turn and not self.closed and not self.failed.is_set()
                 and is_stop_command(text, self.stop_phrases, work_pending=work_pending)):
-            await self.request_hangup(None, turn_id, text, {'status': 'end_call'})
+            await self.request_hangup(None, turn_id, text, {'status': 'end_call'}, locally_settled=locally_settled)
             return True
         return False
 
-    async def request_hangup(self, item_id, turn_id, request, decision, *, direct=None):
+    async def request_hangup(self, item_id, turn_id, request, decision, *, direct=None, locally_settled=False):
         # Both the Desktop stop command and the agent's verified closing action
         # commit to this WhatsApp line. The native line owns teardown from here.
         if self.closed or self.failed.is_set() or self.end_call_sent or self.pending_end_call:
             return
         settled = self.transcripts_done.get(turn_id)
         if (turn_id != self.current_spoken_turn or turn_id != self.heard_caller_turn
-                or settled is None or not settled.is_set() or self.user_turns.get(turn_id) != request):
+                or settled is None or (not settled.is_set() and not locally_settled)
+                or self.user_turns.get(turn_id) != request):
             return
         if self.stop_phrases is not DEFAULT_STOP_PHRASES and not is_stop_command(request, self.stop_phrases):
             return
@@ -1890,6 +1920,11 @@ class LiveCall:
         finally:
             self.pending_end_call = None
 
+    def has_unclaimed_caller_audio(self):
+        return (self.caller_audio_since_turn and self.audio.unclaimed_caller_audio
+                and self.last_caller_voice_at is not None
+                and asyncio.get_running_loop().time() - self.last_caller_voice_at <= CALLER_AUDIO_ASSOCIATION_SECONDS)
+
     def discard_unheard_caller(self, turn_id):
         self.unheard_caller_turns.add(turn_id)
         self.pre_final_proposals.pop(turn_id, None)
@@ -1911,6 +1946,21 @@ class LiveCall:
         if kind in {'input_transcript.added', 'output_transcript.added',
                     'session.context_window.approaching', 'session.context_window.rolled_over'}:
             self.mark(kind)
+        if kind == 'turn.delta' and self.audio.pending_caller_transcript:
+            pending_id, words = self.audio.pending_caller_transcript
+            if pending_id == event.get('turn_id'):
+                delta = event.get('delta') or ''
+                if not isinstance(delta, str):
+                    raise ValueError('Malformed Live transcript delta')
+                words = append_transcript_fragment(words, delta)
+                if not self.has_unclaimed_caller_audio():
+                    self.audio.pending_caller_transcript = (pending_id, words)
+                    return
+                # The first identified fragment after real PCM establishes the
+                # provisional turn even if this provider never emits its final.
+                self.audio.pending_caller_transcript = None
+                kind = 'turn.created'
+                event = {'turn': {'id': pending_id, 'role': 'user', 'transcript': words}}
         if kind == 'turn.interrupted':
             async with self.output_lock:
                 turn_id = event.get('turn_id')
@@ -1947,11 +1997,8 @@ class LiveCall:
                     return
                 if turn_id in self.user_turns and self.transcripts_done[turn_id].is_set():
                     return
-                now = asyncio.get_running_loop().time()
                 if (not history_only and (turn_id not in self.user_turns or turn_id == self.current_spoken_turn)
-                        and self.caller_audio_since_turn and self.last_caller_voice_at is not None
-                        and self.audio.unclaimed_caller_audio
-                        and now - self.last_caller_voice_at <= CALLER_AUDIO_ASSOCIATION_SECONDS):
+                        and self.has_unclaimed_caller_audio()):
                     self.heard_caller_turn = turn_id
                     self.audio.heard_caller_turns.add(turn_id)
                     self.audio.unclaimed_caller_audio = False
@@ -2058,6 +2105,8 @@ class LiveCall:
                                 self.finish_exchange(reply_turn)
                         else:
                             self.finish_pending_spoken_reply(turn_id)
+                if kind == 'turn.created' and not history_only:
+                    self.consider_partial_stop(turn_id)
                 if started and not history_only:
                     clear_old_audio = kind == 'turn.created' and bool(playing or self.playout_expected_until)
                     if clear_old_audio:
@@ -2135,13 +2184,6 @@ class LiveCall:
                 return
             # The .added stream has item IDs and can duplicate these words.
             # Without a shared turn ID, fragments cannot safely be joined.
-            pending = self.audio.pending_caller_transcript
-            if pending and pending[0] == turn_id:
-                delta = event.get('delta') or ''
-                if not isinstance(delta, str):
-                    raise ValueError('Malformed Live transcript delta')
-                self.audio.pending_caller_transcript = (turn_id, append_transcript_fragment(pending[1], delta))
-                return
             if turn_id in self.user_turns and not self.transcripts_done[turn_id].is_set():
                 transcripts = self.user_turns
             elif turn_id in self.reply_transcripts and turn_id == self.active_reply_turn:
@@ -2152,6 +2194,8 @@ class LiveCall:
             if not isinstance(delta, str):
                 raise ValueError('Malformed Live transcript delta')
             transcripts[turn_id] = append_transcript_fragment(transcripts[turn_id], delta)
+            if transcripts is self.user_turns and turn_id == self.current_spoken_turn:
+                self.consider_partial_stop(turn_id)
         elif kind == 'delegation.created':
             item = event.get('item') or {}
             if item.get('target') != 'client':
