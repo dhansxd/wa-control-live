@@ -5,6 +5,7 @@ import base64
 from collections import deque
 from dataclasses import dataclass, field
 import json
+import re
 from uuid import uuid4
 
 import av
@@ -63,8 +64,14 @@ def _chunks(text):
     remaining = text.strip().encode('utf-8')
     while remaining:
         chunk = remaining[:APPEND_BYTES].decode('utf-8', 'ignore')
-        if len(remaining) > APPEND_BYTES and (space := chunk.rfind(' ')) > len(chunk) // 2:
-            chunk = chunk[:space + 1]
+        if len(remaining) > APPEND_BYTES:
+            # Desktop appends whole sentences, falling back to a split only when
+            # a single sentence exceeds the provider's wire allowance.
+            endings = list(re.finditer(r'[.!?](?=\s|$)', chunk))
+            if endings:
+                chunk = chunk[:endings[-1].end()]
+            elif (space := chunk.rfind(' ')) > len(chunk) // 2:
+                chunk = chunk[:space + 1]
         yield chunk
         remaining = remaining[len(chunk.encode('utf-8')):]
 

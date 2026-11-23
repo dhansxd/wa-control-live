@@ -49,11 +49,13 @@ disimpan lewat mekanisme secret Hermes. Lihat kesiapan dengan
 ### Pilih provider Live
 
 Tanpa pengaturan `live`, plugin memakai login Codex yang sudah tersedia.
-Pada panggilan Codex, bila suara sudah menjawab langsung dan belum ada delegasi,
-plugin memakai model Hermes untuk memeriksa maksud ucapan final pemilik. Ini
-dapat memakai token tambahan, termasuk saat mengobrol biasa. Pemeriksaan
-berjalan sambil audio tetap aktif. Pekerjaan yang diterima memakai sesi DM
-WhatsApp yang sedang dibuka.
+Telepon memakai aturan percakapan Hermes Desktop Live dan mengikuti bahasa
+pemilik, termasuk Indonesia dan Inggris. Pada jalur Codex, begitu ucapanmu
+selesai, Hermes memeriksa maksudnya sambil audio tetap aktif. Ini dapat memakai
+token tambahan, termasuk saat mengobrol biasa. Permintaan kerja masuk sekali
+ke sesi DM WhatsApp yang sedang aktif. Kamu bisa langsung melanjutkan obrolan.
+Saat ditanya progres, Hermes memakai hasil alat dan tanda terima pengiriman
+dari sesi itu. Ucapkan “tutup telepon” atau “hang up” untuk mengakhiri panggilan.
 
 Untuk memakai provider lain atau pool, tambahkan blok berikut di bawah
 `plugins.entries.wa-control-live.settings` pada profil Hermes yang sama.

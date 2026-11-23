@@ -5,6 +5,7 @@ from contextlib import closing
 import hashlib
 import importlib
 import importlib.util
+import json
 from pathlib import Path
 import shutil
 import sqlite3
@@ -166,6 +167,49 @@ def test_wrong_pairing_keeps_setup_unpublished_then_retry_saves_live_secret(wiza
     assert wizard.secrets[SECRET_NAME] == SECRET
     assert SECRET not in repr(wizard.settings)
     assert SECRET not in "\n".join(wizard.messages)
+
+
+def test_gateway_restart_after_reinstall_uses_current_bundle_with_existing_pairing(wizard, monkeypatch):
+    monkeypatch.setattr(wizard.module, "choose_live", lambda *_args, **_kwargs: (None, {}))
+    _setup(wizard, [BOT, OWNER, "", ""])
+    old_config = json.loads((wizard.state / "config.json").read_text())
+    store = wizard.state / "whatsapp" / "whatsapp.db"
+    device = store.read_bytes()
+    token = (wizard.state / "adapter.token").read_bytes()
+
+    # Load the installed entry point afresh as the next Hermes gateway would.
+    spec = importlib.util.spec_from_file_location("_reinstalled_voice_plugin", wizard.plugin.__file__)
+    plugin = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, plugin)
+    spec.loader.exec_module(plugin)
+    package = importlib.import_module(f"{spec.name}.setup_sidecar")
+    monkeypatch.setattr(package.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(package.platform, "machine", lambda: "arm64")
+    launcher = plugin._launcher()
+    served = []
+    monkeypatch.setattr(launcher, "serve", lambda config, **_options: served.append(config))
+    monkeypatch.setattr(plugin, "_launcher", lambda: launcher)
+    monkeypatch.setattr(plugin, "_configured_pair", lambda ctx: (
+        ctx.get_config("owner_number"), ctx.get_config("bot_number"),
+    ))
+    monkeypatch.setattr(plugin, "_serve_activation", lambda _home, _ctx: lambda: True)
+    monkeypatch.setitem(sys.modules, "hermes_constants", SimpleNamespace(
+        get_hermes_home=lambda: wizard.home, __file__=str(wizard.home / "hermes_constants.py"),
+    ))
+    parser = argparse.ArgumentParser()
+    plugin._parser(parser)
+    plugin._run(wizard.ctx, parser.parse_args(["serve"]))
+
+    config = served.pop()
+    bundled = plugin._bundled_runtime()
+    assert config["binary_sha256"] == bundled["sidecar_sha256"] != old_config["binary_sha256"]
+    assert Path(config["binary"]) == bundled["binary"]
+    assert json.loads((wizard.state / "config.json").read_text()) == config
+    launcher.verify_paired_identity(config)
+    assert store.read_bytes() == device
+    assert (wizard.state / "adapter.token").read_bytes() == token
+    assert wizard.installs == []
+    assert wizard.links == [BOT]
 
 
 def test_stock_setup_uses_detected_bot_and_confirms_owner_with_prebuilt_sidecar(wizard, monkeypatch, tmp_path):

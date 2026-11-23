@@ -29,7 +29,7 @@ PNG = base64.b64decode(
 
 
 @asynccontextmanager
-async def spoken_image_request(home, session_id, voice, monkeypatch):
+async def spoken_image_request(home, session_id, voice, monkeypatch, *, while_waiting=False):
     monkeypatch.syspath_prepend(str(Path(__file__).parent / "spikes" / "003-whatsapp-call"))
     from call_adapter import AgentJobs
     from test_general_delegation import audio_messages, feed_output, local_voice
@@ -37,10 +37,16 @@ async def spoken_image_request(home, session_id, voice, monkeypatch):
     request_text = "Buatkan satu gambar."
     decisions, admissions = [], []
     submitted = asyncio.Event()
+    deciding, continue_decision = asyncio.Event(), asyncio.Event()
 
     async def classify(**kwargs):
         intent = json.loads(kwargs["input"][0]["text"])
         decisions.append((intent["current"], intent["proposal"]))
+        if while_waiting:
+            if intent["current"] != request_text:
+                return SimpleNamespace(parsed={"action": "reply"})
+            deciding.set()
+            await continue_decision.wait()
         return SimpleNamespace(parsed={"action": "task", "evidence": request_text})
 
     async def dispatch(request, _timeout):
@@ -59,18 +65,32 @@ async def spoken_image_request(home, session_id, voice, monkeypatch):
         call.feed(struct.pack("<h", 800) * 320)
         await call.on_data({"type": "turn.created", "turn": {"id": "caller", "role": "user"}})
         await call.on_data({"type": "turn.done", "turn": {"id": "caller", "role": "user", "transcript": request_text}})
-        await call.on_data({"type": "turn.created", "turn": {"id": "reply", "role": "assistant"}})
-        await feed_output(call, remote, 1400)
-        await call.on_data({"type": "turn.done", "turn": {"id": "reply", "role": "assistant",
-                           "transcript": "Aku akan buat gambarnya dan kirim ke chat ini."}})
-        assert audio_messages(sent)
+        if while_waiting:
+            await asyncio.wait_for(deciding.wait(), 3)
+            call.feed(struct.pack("<h", 800) * 320)
+            await call.on_data({"type": "turn.done", "turn": {"id": "follow-up", "role": "user",
+                               "transcript": "Iya, aku tunggu."}})
+            continue_decision.set()
+        else:
+            await call.on_data({"type": "turn.created", "turn": {"id": "reply", "role": "assistant"}})
+            await feed_output(call, remote, 1400)
+            await call.on_data({"type": "turn.done", "turn": {"id": "reply", "role": "assistant",
+                               "transcript": "Aku akan buat gambarnya dan kirim ke chat ini."}})
+            assert audio_messages(sent)
         try:
             await asyncio.wait_for(submitted.wait(), 4)
         except TimeoutError:
             pytest.fail(f"Spoken request produced {len(decisions)} route decisions and {len(admissions)} admissions")
         assert admissions[0]["receipt"]["session_id"] == session_id
         yield admissions[0]
-        assert decisions == [(request_text, "")] and len(admissions) == 1
+        assert len(admissions) == 1
+        if while_waiting:
+            call.feed(struct.pack("<h", 800) * 320)
+            await call.on_data({"type": "turn.done", "turn": {"id": "closing", "role": "user",
+                               "transcript": "Tutup telepon."}})
+            assert sum(packet.get("ownerCallEnd") is True for packet in sent) == 1
+        else:
+            assert decisions == [(request_text, "")]
         assert not call.delegations and not call.closed and not call.failed.is_set()
     finally:
         await asyncio.wait_for(call.close(), 5)
@@ -83,6 +103,7 @@ async def spoken_image_request(home, session_id, voice, monkeypatch):
     pytest.param(PHONE, False, 422, False, id="photo-rejected-after-text-sent"),
     pytest.param(LID, False, 200, True, id="spoken-without-delegation-accepted"),
     pytest.param(LID, False, 422, True, id="spoken-without-delegation-rejected"),
+    pytest.param(LID, False, 200, "while-waiting", id="acknowledge-during-admission-deliver-before-hangup"),
 ])
 def test_first_voice_task_delivers_image(tmp_path, monkeypatch, origin, inbound_after_restart, image_status, spoken):
     home = tmp_path / "profile"
@@ -236,7 +257,8 @@ def test_first_voice_task_delivers_image(tmp_path, monkeypatch, origin, inbound_
             opened = await voice({"action": "context"})
             assert opened["session_id"] == entry.session_id
             if spoken:
-                async with spoken_image_request(home, entry.session_id, voice, monkeypatch) as receipt:
+                async with spoken_image_request(home, entry.session_id, voice, monkeypatch,
+                                                while_waiting=spoken == "while-waiting") as receipt:
                     await asyncio.wait_for(image_started.wait(), 5)
                     assert all(dest == PHONE for _, dest in outbound)
                     await verify_delivery(receipt)

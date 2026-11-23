@@ -1277,7 +1277,7 @@ impl Bridge {
         tokio::pin!(max_duration, ended);
 
         let mut provider_notice = None;
-        let (end_reason, ended_by) = loop {
+        let (mut end_reason, ended_by) = loop {
             tokio::select! {
                 _ = &mut ended => break ("call ended".to_string(), "phone"),
                 _ = &mut max_duration => break ("maximum call length reached".to_string(), "limit"),
@@ -1328,6 +1328,8 @@ impl Bridge {
                         None => live.events.recv().await,
                     }
                 } => match ev {
+                    // Unlike a model's proposed farewell, this is a committed owner action.
+                    Some(LiveEvent::OwnerCallEnd) => break ("assistant ended the call".to_string(), "assistant"),
                     Some(LiveEvent::Audio(pcm)) => {
                         let at_ms = connecting.elapsed().as_millis();
                         output_diagnostics.observe(&pcm, at_ms);
@@ -1451,8 +1453,16 @@ impl Bridge {
             capture.lock().unwrap().finish();
         }
         drop(live);
-        if ended_by != "phone" {
-            line.hang_up().await;
+        match ended_by {
+            "assistant" => {
+                // Dropping the native terminate future tears down this exact call
+                // even when WhatsApp cannot send the final stanza to the peer.
+                if tokio::time::timeout(Duration::from_secs(5), line.hang_up()).await.is_err() {
+                    end_reason.push_str(" (peer notification timed out)");
+                }
+            }
+            "phone" => {}
+            _ => line.hang_up().await,
         }
         if let Some(w) = recorder
             && let Err(e) = w.finish()

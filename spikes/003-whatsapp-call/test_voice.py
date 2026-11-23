@@ -143,7 +143,7 @@ def test_phone_identity_and_language_reach_initial_developer_context(tmp_path, m
     identity = items[0]['text']
     assert 'pemilik akun' in identity
     assert 'Ikuti bahasa dan alur percakapan pemilik akun dengan wajar.' in identity
-    assert 'hangat dan ekspresif sesuai suasana obrolan' in identity
+    assert 'Speak naturally at an unhurried pace.' in identity
     assert 'Mulai dengan jawaban atau tindakan yang diminta.' in identity
     assert 'Lewati pembuka yang hanya menyatakan bahwa kamu paham' in identity
     assert 'sebut rencanamu dalam satu kalimat singkat' in identity

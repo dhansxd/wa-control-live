@@ -8,6 +8,9 @@
 
 ## MIT License
 
+Hermes Desktop Live diadaptasi dari [instruksi suara](https://github.com/NousResearch/hermes-agent/blob/ae2a81ccc00e9b7c06301523e5bb09608397149c/tools/voice_live.py), [konteks dan keluaran suara](https://github.com/NousResearch/hermes-agent/blob/ae2a81ccc00e9b7c06301523e5bb09608397149c/apps/desktop/src/lib/voice-live.ts), [delegasi percakapan](https://github.com/NousResearch/hermes-agent/blob/ae2a81ccc00e9b7c06301523e5bb09608397149c/apps/desktop/src/app/chat/composer/hooks/use-voice-live-conversation.ts), dan [penutup percakapan](https://github.com/NousResearch/hermes-agent/blob/ae2a81ccc00e9b7c06301523e5bb09608397149c/apps/desktop/src/lib/voice-stop-word.ts).
+
+Copyright (c) 2025 Nous Research
 Copyright (c) 2026 Synero
 Copyright (c) 2025 João Lucas de Oliveira Lopes
 

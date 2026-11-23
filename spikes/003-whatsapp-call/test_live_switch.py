@@ -1139,3 +1139,44 @@ def test_unrepresentable_provider_retry_time_preserves_failure_notice():
     assert notice['reason'] == 'all_rate_limited'
     assert 'Coba lagi paling awal' not in notice['message']
     assert notice['audioPcm']
+
+
+def test_switch_keeps_confirmed_receipt_and_drops_old_pcm_queued_behind_playout_clear(tmp_path):
+    async def exercise():
+        row = {'session_id': SESSION, 'admission_id': ADMISSION, 'status': 'completed', 'text': 'Buat gambar.'}
+        class FinishedJobs(Jobs):
+            async def prepare_context(self):
+                # Initial Hermes read has the admission. The sender receipt is a later watcher update.
+                return {'status': 'ready', 'session_id': SESSION, 'history': [], 'work': [row]}
+
+        async with make_app(tmp_path, jobs=FinishedJobs()) as (app, client, url, opened):
+            async with client.ws_connect(url + '/live') as ws:
+                await ws.send_json({'setup': {}})
+                assert await ws.receive_json(timeout=2) == {'setupComplete': {}}
+                _, old = await asyncio.wait_for(opened.get(), 2)
+                voice = app[STATE]['voice']
+                voice.update_dm_work([{**row, 'delivery': {'has_attachments': True, 'media_delivery': 'sent'}}])
+                clearing, release = asyncio.Event(), asyncio.Event()
+                clear = voice.clear_playout
+                async def pause_clear():
+                    await clear()
+                    clearing.set()
+                    await release.wait()
+                voice.clear_playout = pause_clear
+                switch = asyncio.create_task(provider_request(client, url, 'gemini'))
+                try:
+                    await asyncio.wait_for(clearing.wait(), 2)
+                    old_pcm = asyncio.create_task(old.scope.output_audio(b'\x12\x01' * 20))
+                    await asyncio.sleep(0)
+                    assert not old_pcm.done()
+                finally:
+                    release.set()
+                assert (await asyncio.wait_for(switch, 2))['status'] == 'switched'
+                await asyncio.wait_for(old_pcm, 1)
+                _, new = await asyncio.wait_for(opened.get(), 1)
+                fresh = b'\x50\x02' * 20
+                await new.scope.output_audio(fresh)
+                assert await ws.receive_json(timeout=1) == {'serverContent': {'interrupted': True}}
+                assert await ws.receive_json(timeout=1) == audio_envelope(fresh)
+                assert any('"media_delivery": "sent"' in item['text'] for item in new.initial_items)
+    asyncio.run(exercise())

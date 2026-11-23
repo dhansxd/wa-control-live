@@ -1017,7 +1017,8 @@ def test_repeated_status_never_resubmits_a_dm_turn_or_hides_a_new_task(tmp_path,
                 status = 'started' if len(observed) == 1 else 'unavailable'
                 return {'status': status, 'session_id': session_id, 'admission_id': admission_id}
 
-            async def submit(self, _submission_id, request, *, session_id, spoken_at_ms=None):
+            async def submit(self, _submission_id, request, *, session_id, spoken_at_ms=None, voice_context=None):
+                assert voice_context.startswith("User: ") and voice_context.endswith(new_request)
                 submitted.append((request, session_id))
                 return {'status': 'completed', 'output': 'Daftar belanjanya sudah dibuat.',
                         'receipt': {'session_id': session_id, 'admission_id': 'unrelated-native-job'}}
@@ -2433,4 +2434,57 @@ def test_next_turn_does_not_save_exchange_before_pending_route_finishes(
         assert submitted == ([(ACTIVE_WHATSAPP_SESSION, request)] if route_status == 'task' else [])
         assert saved == ([] if submit_status in {'queued', 'unknown'} else [(request, 'Baik.')])
 
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('transcript_final_first', [True, False])
+def test_inbound_opening_parks_progress_and_suppresses_stale_pcm_during_first_utterance(
+        tmp_path, monkeypatch, transcript_final_first):
+    async def exercise():
+        voice, remote, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        voice.call_direction = 'inbound'
+        voice.waiting_for_caller = True
+        voice.update_dm_work([{'session_id': ACTIVE_WHATSAPP_SESSION, 'admission_id': DM_ADMISSION_ID,
+                               'status': 'started', 'text': 'Buat video taman.'}])
+        updates = []
+
+        async def append(text):
+            updates.append(text)
+            return True
+
+        monkeypatch.setattr(voice.connection, 'append_context', append)
+        async def turn(kind, role, turn_id, text=''):
+            await voice.on_data({'type': kind, 'turn': {'role': role, 'id': turn_id, 'transcript': text}})
+
+        try:
+            await voice.apply_tool_progress({'admission_id': DM_ADMISSION_ID, 'generation': 1, 'seq': 12,
+                                            'tool_id': 'render', 'tool_name': 'renderer', 'phase': 'failed',
+                                            'detail': 'Font Meranti hilang.'})
+            assert not updates
+            assert 'Meranti' in voice.grounded_work_context()
+            await turn('turn.created', 'assistant', 'unrequested')
+            await feed_output(voice, remote, 1200)
+            voice.feed(struct.pack('<h', 300) * 320)
+            await turn('turn.done', 'assistant', 'unrequested', 'Aku mau coba lagi.')
+            await turn('turn.created', 'user', 'owner')
+            # Codex output transcripts and PCM can lead their own turn event.
+            # The first natural user turn can begin after the stale assistant's final.
+            voice.feed(struct.pack('<h', 250) * 320)
+            await feed_output(voice, remote, 1700)
+            assert not audio_messages(sent)
+            if transcript_final_first:
+                await turn('turn.done', 'user', 'owner', 'Mengapa prosesnya gagal?')
+                await feed_output(voice, remote, 1800)
+                await turn('turn.created', 'assistant', 'answer')
+            else:
+                await turn('turn.created', 'assistant', 'answer')
+                await feed_output(voice, remote, 1600)
+                assert not audio_messages(sent)
+                voice.last_caller_voice_at -= 1  # Native speech stopped before its final transcript arrived.
+                await feed_output(voice, remote, 1800)
+                await turn('turn.done', 'user', 'owner', 'Mengapa prosesnya gagal?')
+            await turn('turn.done', 'assistant', 'answer', 'Render gagal karena font Meranti hilang.')
+            assert audio_messages(sent) == [adapter.audio_envelope(struct.pack('<h', 1800) * 480)]
+        finally:
+            await voice.close()
     asyncio.run(exercise())

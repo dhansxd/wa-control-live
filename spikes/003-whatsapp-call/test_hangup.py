@@ -17,8 +17,7 @@ def turn(role, turn_id, text='', *, phase='done'):
 
 
 def end_call_events(messages):
-    return [call for message in messages
-            for call in message.get('toolCall', {}).get('functionCalls', [])]
+    return [message for message in messages if message.get('ownerCallEnd') is True]
 
 
 def test_dm_reconnect_keeps_caller_and_reply_audio_running(tmp_path, monkeypatch):
@@ -71,155 +70,184 @@ def test_hangup_intent_provider_failure_cannot_authorize_actions():
     assert result == {'status': 'unavailable'}
 
 
-@pytest.mark.parametrize('interruption', ['before_farewell', 'after_farewell', None])
-def test_hangup_waits_for_spoken_farewell_and_can_be_cancelled(tmp_path, monkeypatch, interruption):
+@pytest.mark.parametrize(('utterance', 'config', 'expected'), [
+    ("Hey Hermes, that's all!", None, True),
+    ("Okay, stop listening.", ['stop'], True),
+    ("That’s all.", None, True),
+    ("Ya udah matikan teleponnya.", None, True),
+    ("Hermes, tutup telepon.", None, True),
+    ("Yaudah matikan, kenapa masih nyala? Matikan teleponnya", None, False),
+    ("Tolong jangan tutup telepon.", None, False),
+    ("Don't hang up", None, False),
+    ("How do I stop a running process?", None, False),
+    ("Tutup aplikasi telepon", None, False),
+    ("Hermes", None, False),
+    ("“Selesai, Hermes.”", ["selesai Hermes"], True),
+    ("«ОТБОЙ!»", "отбой", True),
+    ("bye", ["selesai"], False),
+    ("stop", [], False),
+    ("matikan teleponnya", [], False),
+    ("end the conversation", {}, True),
+])
+def test_whole_utterance_stop_matches_desktop_and_profile(utterance, config, expected):
+    from voice_stop import stop_phrases, is_stop_command
+
+    assert is_stop_command(utterance, stop_phrases(config)) is expected
+
+
+@pytest.mark.parametrize('current', ['Ya udah matikan teleponnya.', 'Hang up.'])
+def test_spoken_stop_ends_once_without_a_provider_proposal_or_farewell(tmp_path, monkeypatch, current):
     async def exercise():
-        current = 'Aku rasa cukup untuk hari ini.'
-        routed = []
-
-        class Jobs:
-            async def route(self, proposal, spoken, previous, loaded_context, *, session_id):
-                routed.append(spoken)
-                assert proposal == spoken == current
-                assert previous == loaded_context == ''
-                return {'status': 'end_call'}
-
-            async def save_exchange(self, _session_id, _exchange, *, wait_for_lease=False):
-                return {'status': 'saved'}
-
-        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
-        try:
-            await voice.on_data(turn('user', 'caller-1', current, phase='created'))
-            voice.connection._data(json.dumps(delegation([current])))
-            await wait_until(lambda: bool(appended))
-            assert appended[0]['delegation_item_id'] == 'request-1'
-            assert appended[0]['channel'] == 'commentary'
-            assert not routed
-            assert not voice.pending_end_call
-            await acknowledge(voice, 'request-1')
-            await voice.on_data(turn('user', 'caller-1', current))
-            await wait_until(lambda: len(appended) == 2)
-            assert appended[1]['channel'] == 'speakable'
-            assert routed == [current]
-            await voice.on_data(turn('assistant', 'earlier-reply', phase='created'))
-            await acknowledge(voice, 'request-1')
-            await voice.on_data(turn('assistant', 'earlier-reply', 'Respon yang sudah berjalan.'))
-            assert end_call_events(sent) == []
-
-            await voice.on_data(turn('assistant', 'farewell', phase='created'))
-            await voice.on_data(turn('assistant', 'farewell', 'Sampai nanti.'))
-            assert end_call_events(sent) == []  # transcript can arrive before RTP
-
-            if interruption == 'before_farewell':
-                await voice.on_data(turn('user', 'caller-2', phase='created'))
-                await feed_output(voice, remote, 1700)
-                assert end_call_events(sent) == []
-                return
-
-            await feed_output(voice, remote, 1700)
-            await wait_until(lambda: bool(end_call_events(sent)))
-            assert 'modelTurn' in sent[-2]['serverContent']
-            assert end_call_events(sent) == [{'id': 'request-1', 'name': 'end_call', 'args': {}}]
-            assert not voice.native_task_turns
-            voice.on_sidecar_response({'functionResponses': [
-                {'id': 'request-1', 'name': 'end_call', 'response': {'ok': True}},
-            ]})
-            assert voice.report['assistant_hangup'] == 'accepted'
-            await feed_output(voice, remote, 3)
-            assert sent[-1].get('toolCall')  # idle frames do not keep the sidecar queue full
-
-            if interruption == 'after_farewell':
-                await voice.on_data(turn('user', 'caller-2', phase='created'))
-                clear = {'serverContent': {'interrupted': True}}
-                assert sent[-1] == clear and sent.count(clear) == 1
-                assert voice.report['assistant_hangup'] == 'cancelled'
-                await feed_output(voice, remote, 1200)
-                assert sent[-1] == clear
-                await voice.on_data(turn('user', 'caller-2', 'Bentar, aku mau lanjut.'))
-                await voice.on_data(turn('assistant', 'new-reply', phase='created'))
-                await feed_output(voice, remote, 1500)
-                assert 'modelTurn' in sent[-1]['serverContent']
-        finally:
-            await voice.close()
-
-    asyncio.run(exercise())
-
-
-@pytest.mark.parametrize('outcome', ['missing_transcript', 'no_ack', 'caller_resumes'])
-def test_confirmed_hangup_does_not_depend_on_provider_farewell(tmp_path, monkeypatch, outcome):
-    async def exercise():
-        class Jobs(TranscriptJobs):
-            async def route(self, *_args, **_kwargs):
-                return {'status': 'end_call'}
-
-        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        voice, _, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
         voice.call_work.add(DM_ADMISSION_ID)
-        owner_request = 'Tutup teleponnya sekarang ya.'
-
         try:
-            await voice.on_data(turn('user', 'caller-1', owner_request))
-            await voice.on_data(delegation([owner_request]))
-            await wait_until(lambda: bool(appended))
-            deadline_task = voice.tasks[-1]
-            if outcome == 'missing_transcript':
-                await acknowledge(voice, 'request-1')
-                await voice.on_data(turn('assistant', 'farewell', phase='created'))
-                await feed_output(voice, remote, 1700)
-            elif outcome == 'caller_resumes':
-                await voice.on_data(turn('user', 'caller-2', phase='created'))
-            assert end_call_events(sent) == []
-
-            await asyncio.wait_for(deadline_task, 1)
-            if outcome == 'caller_resumes':
-                assert voice.report['assistant_hangup'] == 'cancelled'
-                assert end_call_events(sent) == []
-            else:
-                assert voice.report['assistant_hangup_farewell'] == 'timeout'
-                assert end_call_events(sent) == [{'id': 'request-1', 'name': 'end_call', 'args': {}}]
-                await acknowledge(voice, 'request-1')
-                assert len(end_call_events(sent)) == 1
+            voice.feed(b'\x00\x01' * 320)
+            await voice.on_data(turn('user', 'caller-1', current, phase='created'))
+            assert not end_call_events(sent)
+            await voice.on_data(turn('user', 'caller-1', current))
+            assert end_call_events(sent) == [{'ownerCallEnd': True}]
+            await voice.on_data(turn('user', 'caller-1', current))
+            voice.feed(b'\x00\x01' * 320)
+            await voice.on_data(turn('user', 'caller-2', 'Tutup teleponnya.'))
+            await voice.on_data({'type': 'turn.interrupted'})
+            await voice.output_audio(bytes(640))
+            assert sent[-1] == {'ownerCallEnd': True}
+            assert len(end_call_events(sent)) == 1
             assert voice.call_work == {DM_ADMISSION_ID}
         finally:
             await voice.close()
 
-    monkeypatch.setattr(adapter, 'FAREWELL_WAIT_SECONDS', 0.05)
-    monkeypatch.setattr(adapter, 'RESULT_ACK_TIMEOUT', 0.01)
     asyncio.run(exercise())
 
 
-def test_existing_farewell_is_not_requested_twice(tmp_path, monkeypatch):
+def test_closed_transport_after_owner_stop_ends_live_and_keeps_native_work(tmp_path, monkeypatch):
     async def exercise():
-        classified = asyncio.Event()
-        release = asyncio.Event()
+        voice, _, _, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
 
-        class Jobs(TranscriptJobs):
-            async def route(self, *_args, **_kwargs):
-                classified.set()
-                await release.wait()
-                return {'status': 'end_call'}
+        async def disconnect(message):
+            if message.get('ownerCallEnd'):
+                raise ConnectionResetError('fixture native line disconnected')
 
-        voice, remote, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
-        owner_request = 'Tutup teleponnya sekarang ya.'
+        monkeypatch.setattr(voice, 'send', disconnect)
+        voice.call_work.add(DM_ADMISSION_ID)
         try:
-            await voice.on_data(turn('user', 'caller-1', owner_request))
-            await voice.on_data(delegation([owner_request]))
-            await asyncio.wait_for(classified.wait(), 1)
-            await voice.on_data(turn('assistant', 'farewell', phase='created'))
-            await feed_output(voice, remote, 1700)
-            await voice.on_data(turn('assistant', 'farewell', 'Sampai nanti.'))
-            assert end_call_events(sent) == []
-
-            release.set()
-            await wait_until(lambda: bool(end_call_events(sent)))
-            await wait_until(lambda: bool(appended))
-            assert [message['channel'] for message in appended] == ['commentary']
-            assert voice.report['assistant_hangup_farewell'] == 'sent'
-            await acknowledge(voice, 'request-1')
-            assert end_call_events(sent) == [{'id': 'request-1', 'name': 'end_call', 'args': {}}]
+            voice.feed(bytes([0, 1]) * 320)
+            await voice.on_data(turn('user', 'owner', 'End this call.'))
+            assert voice.failed.is_set()
+            assert voice.report['assistant_hangup'] == 'transport_disconnected'
+            assert voice.call_work == {DM_ADMISSION_ID}
         finally:
             await voice.close()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('origin', ['silent', 'assistant', 'history', 'prior-call'])
+def test_stop_requires_live_authenticated_caller_evidence(tmp_path, monkeypatch, origin):
+    async def exercise():
+        voice, _, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        try:
+            if origin != 'silent':
+                voice.feed(b'\x00\x01' * 320)
+            if origin == 'prior-call':
+                voice.session_changed()
+            role = 'assistant' if origin == 'assistant' else 'user'
+            await voice.on_data(turn(role, 'turn-1', 'Stop.'), history_only=origin == 'history')
+            assert not end_call_events(sent)
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+def test_verified_semantic_hangup_ends_once_during_new_speech(tmp_path, monkeypatch):
+    async def exercise():
+        class Jobs(TranscriptJobs):
+            async def route(self, *_args, **_kwargs):
+                return {'status': 'end_call'}
+
+        voice, _, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        request = 'Aku rasa pembicaraan kita sampai di sini dulu.'
+        try:
+            voice.feed(b'\x00\x01' * 320)
+            voice.feed(bytes([0, 1]) * 320)
+            await voice.on_data(turn('user', 'caller-1', request))
+            await voice.on_data(delegation([request]))
+            await wait_until(lambda: bool(end_call_events(sent)))
+            await voice.on_data(turn('user', 'caller-2', phase='created'))
+            await voice.on_data(turn('user', 'caller-2', 'Iya, tutup.'))
+            assert end_call_events(sent) == [{'ownerCallEnd': True}]
+            assert voice.report['assistant_hangup'] == 'requested'
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+@pytest.mark.parametrize(('words', 'custom', 'close'), [
+    ('Stop.', None, False),
+    ('Hey Hermes, cancel.', None, False),
+    ('Never mind.', None, False),
+    ('Stop it.', None, False),
+    ('Batalkan pekerjaan itu.', None, False),
+    ('Tutup teleponnya.', None, True),
+    ('Please hang up.', None, True),
+    ('Cancel.', ['cancel'], True),
+])
+@pytest.mark.parametrize('working', ['admitted', 'pending'])
+def test_bare_stop_with_work_keeps_native_intent_available(tmp_path, monkeypatch, words, custom, close, working):
+    from voice_stop import stop_phrases
+
+    async def exercise():
+        routed = []
+
+        class Jobs(TranscriptJobs):
+            async def route(self, _proposal, request, *_args, **_kwargs):
+                routed.append(request)
+                return {'status': 'reply'}
+
+        voice, _, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        try:
+            if working == 'admitted':
+                voice.dm_work = [{'admission_id': DM_ADMISSION_ID, 'status': 'started', 'generation': 0}]
+            else:
+                voice.routing_turns['prior'] = asyncio.current_task()
+            voice.stop_phrases = stop_phrases(custom)
+            voice.feed(bytes([0, 1]) * 320)
+            await voice.on_data(turn('user', 'caller-1', words))
+            if not close:
+                await wait_until(lambda: routed == [words])
+            assert bool(end_call_events(sent)) is close
+            assert (not routed) is close
+        finally:
+            voice.routing_turns.pop('prior', None)
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('origin', ['unheard', 'withdrawn', 'custom', 'disabled'])
+def test_semantic_close_needs_settled_current_owner_request(tmp_path, monkeypatch, origin):
+    from voice_stop import stop_phrases
+
+    async def exercise():
+        voice, _, sent, _ = local_voice(tmp_path, monkeypatch, agent_jobs=TranscriptJobs())
+        request = 'Okay, let’s finish up here.'
+        try:
+            if origin != 'unheard':
+                voice.feed(bytes([0, 1]) * 320)
+            await voice.on_data(turn('user', 'caller-1', request))
+            if origin == 'withdrawn':
+                voice.feed(bytes([0, 1]) * 320)
+                await voice.on_data(turn('user', 'caller-2', 'Actually, keep talking.'))
+            if origin in ('custom', 'disabled'):
+                voice.stop_phrases = stop_phrases([] if origin == 'disabled' else ['beres'])
+            await voice.request_hangup(None, 'caller-1', request, {'status': 'end_call'})
+            assert not end_call_events(sent)
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
 
 @pytest.mark.parametrize('work,close,expected', [
     ('telepon aku besok jam sembilan', 'tutup sekarang', 'end_call'),
@@ -243,6 +271,7 @@ def test_combined_callback_is_admitted_once_before_hangup(tmp_path, monkeypatch,
         started, release = asyncio.Event(), asyncio.Event()
         request = 'Lanjutkan render, telepon aku besok jam sembilan, lalu tutup sekarang.'
         callback = 'telepon aku besok jam sembilan'
+        callback_id = 'b' * 32
         submissions = []
 
         class Jobs(TranscriptJobs):
@@ -255,12 +284,12 @@ def test_combined_callback_is_admitted_once_before_hangup(tmp_path, monkeypatch,
                 await release.wait()
                 if outcome == 'unavailable':
                     return {'status': 'unavailable'}
-                return {'status': 'queued', 'receipt': {'admission_id': 'callback', 'session_id': session_id}}
+                return {'status': 'queued', 'receipt': {'admission_id': callback_id, 'session_id': session_id}}
 
         voice, _, sent, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
         voice.call_work.add(DM_ADMISSION_ID)
-        monkeypatch.setattr(adapter, 'FAREWELL_WAIT_SECONDS', .02)
         try:
+            voice.feed(bytes([0, 1]) * 320)
             await voice.on_data(turn('user', 'caller-1', request))
             await voice.on_data(delegation([request]))
             await asyncio.wait_for(started.wait(), 1)
@@ -272,21 +301,13 @@ def test_combined_callback_is_admitted_once_before_hangup(tmp_path, monkeypatch,
                 await voice.on_data(turn('assistant', 'early', phase='created'))
                 await voice.on_data(turn('assistant', 'early', 'Aku urus dulu.'))
             release.set()
-            await wait_until(lambda: bool(appended) or outcome == 'interrupted' and 'callback' in voice.call_work)
+            await wait_until(lambda: bool(end_call_events(sent)))
             assert len(submissions) == 1
             assert submissions[0][:2] == (request, voice.hermes_session_id)
             assert callback in submissions[0][2]
             assert DM_ADMISSION_ID in voice.call_work
-            if outcome != 'interrupted':
-                await wait_until(lambda: bool(end_call_events(sent)))
-                assert ('callback' in voice.call_work) == (outcome == 'queued')
-                assert len(end_call_events(sent)) == 1
-                assert 'jadwal' in appended[-1]['content'][0]['text'].lower()
-                assert 'belum terkonfirmasi' in appended[-1]['content'][0]['text'].lower()
-                assert appended[-1]['channel'] == 'speakable'
-            else:
-                assert not voice.pending_end_call
-                assert end_call_events(sent) == []
+            assert (callback_id in voice.call_work) == (outcome != 'unavailable')
+            assert end_call_events(sent) == [{'ownerCallEnd': True}]
         finally:
             release.set()
             await voice.close()

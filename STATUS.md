@@ -19,6 +19,32 @@ Untuk melanjutkan pengembangan, buka [handoff](HANDOFF.md),
 
 ## Hasil verifikasi
 
+### Hermes Desktop Live di WhatsApp (24 November 2026)
+
+Dasar plugin sebelum perubahan adalah `8ff07d3`. Perbandingan memakai Hermes
+v0.23.2 (`ae2a81c`), macOS 27.2.1 arm64, Python 3.12.15 dan Node 22.23.5.
+Sumber Desktop dan lisensinya tercantum di [atribusi](THIRD_PARTY_NOTICES.md).
+
+| Skenario identik | Sebelum | Kandidat |
+| --- | --- | --- |
+| Permintaan gambar, langsung disusul “iya, aku tunggu”, tanpa jawaban atau delegasi model | Tugas tidak masuk sebelum batas uji | Satu pekerjaan di sesi DM yang sudah ada. Teks dan gambar diterima transport uji selama panggilan. Perintah penutup berikutnya memutus telepon. |
+| Codex Realtime sungguhan, audio sintetis “Hermes, hang up the phone”, jalur klasifikasi uji mengembalikan percakapan biasa | Mengucapkan salam penutup, nol perintah putus | Satu perintah putus dari transkrip final, nol pekerjaan |
+| Codex Realtime sungguhan, permintaan gambar dalam bahasa Indonesia, eksekutor simulasi | Satu pengajuan dan satu jawaban | Satu pengajuan dan satu jawaban |
+| Codex Realtime sungguhan, tanyakan langkah render terakhir setelah alat melaporkan font Meranti belum terpasang | PCM jawaban pertama terukur sebelum pertanyaan selesai | Menjawab 1,69 detik sesudah audio pertanyaan selesai, menyebut kegagalan font Meranti, dan tidak memulai ulang tugas |
+| Suite beku dari `cfbb3f1` untuk Control, DM, sesi, interupsi audio dan tanda terima | 48/48 di `8ff07d3` | 48/48 di kandidat |
+
+Pada `907e804`, 41 skenario Control, DM dan interupsi di atas juga lulus.
+Tujuh skenario pengiriman yang ditambahkan kemudian masih gagal pada revisi itu.
+Sepuluh dari 23 fixture lama untuk penutupan dan tindak lanjut bergantung pada
+timer salam penutup, pembatalan oleh audio susulan, atau sinyal ke model.
+Fixture penggantinya memeriksa penutupan oleh transport, kelanjutan pekerjaan
+dan pengakuan asli Hermes untuk permintaan gabungan seperti jadwal telepon balik.
+
+Uji integrasi gambar menjalankan gateway dan penerimaan tugas Hermes asli
+dengan model dan transport WhatsApp lokal yang disimulasikan. Uji audio memakai
+suara sintetis dan akun Codex, tanpa menelepon kontak. Pembandingan langsung
+antara dua panggilan pada perangkat fisik masih terbuka.
+
 ### Penerimaan tugas setelah jawaban langsung Codex (23 November 2026)
 
 Dengan kode dasar `cfbb3f1`, transkrip final permintaan foto dan jawaban suara

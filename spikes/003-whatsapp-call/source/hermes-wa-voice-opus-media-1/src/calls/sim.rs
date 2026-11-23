@@ -310,6 +310,7 @@ async fn start_hermes() -> (String, Arc<HermesState>) {
 // ---- fake phone ------------------------------------------------------------------------------
 
 struct FakeLine {
+    stall_terminate: bool,
     phone_hung_up: watch::Receiver<bool>,
     bridge_hung_up: Arc<AtomicBool>,
 }
@@ -329,7 +330,11 @@ impl Line for FakeLine {
 
     fn hang_up(&self) -> impl Future<Output = ()> + Send {
         self.bridge_hung_up.store(true, SeqCst);
-        async {}
+        async {
+            if self.stall_terminate {
+                std::future::pending::<()>().await;
+            }
+        }
     }
 }
 
@@ -382,6 +387,7 @@ impl Phone {
 // ---- harness ---------------------------------------------------------------------------------
 
 struct Sim {
+    stall_terminate: bool,
     bridge: Arc<Bridge>,
     model: FakeModel,
     hermes: Arc<HermesState>,
@@ -431,6 +437,7 @@ impl Sim {
         tweak(&mut cfg);
         Self {
             bridge: Arc::new(Bridge::new(cfg, None)),
+            stall_terminate: false,
             model,
             hermes,
         }
@@ -458,6 +465,7 @@ impl Sim {
         let (hang_up, phone_hung_up) = watch::channel(false);
         let bridge_hung_up = Arc::new(AtomicBool::new(false));
         let line = FakeLine {
+            stall_terminate: self.stall_terminate,
             phone_hung_up,
             bridge_hung_up: bridge_hung_up.clone(),
         };
@@ -826,6 +834,54 @@ async fn fails_cleanly_when_the_voice_model_is_unreachable() {
     assert_eq!(r.status, Status::Failed);
     assert_eq!(r.metrics.ended_by, "error");
     assert!(phone.bridge_hung_up());
+}
+
+#[tokio::test]
+async fn verified_local_owner_end_closes_the_phone_despite_more_speech() {
+    let mut sim = Sim::new(false, |cfg| cfg.gemini_url.push_str("/live")).await;
+    let (id, phone, task) = sim.call();
+    let mut model = sim.model.accept().await;
+    model.wait_text().await;
+    model.say("Anything else?");
+    model.send(json!({"ownerCallEnd": true}));
+    model.heard("Tutup teleponnya.");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !phone.bridge_hung_up() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("verified stop must close the native line");
+    let record = sim.finished(&id, task).await;
+    assert_eq!(record.metrics.ended_by, "assistant");
+    assert!(phone.bridge_hung_up());
+}
+
+#[tokio::test]
+async fn blocked_peer_terminate_releases_the_active_call() {
+    let mut sim = Sim::new(false, |cfg| cfg.gemini_url.push_str("/live")).await;
+    sim.stall_terminate = true;
+    let (id, phone, task) = sim.call();
+    let mut model = sim.model.accept().await;
+    model.wait_text().await;
+    model.send(json!({"ownerCallEnd": true}));
+    let record = sim.finished(&id, task).await;
+    assert!(phone.bridge_hung_up());
+    assert_eq!(record.metrics.ended_by, "assistant");
+    assert!(record.end_reason.as_deref().unwrap().contains("peer notification timed out"));
+    assert!(sim.bridge.calls.begin("inbound", "next call").is_ok());
+}
+
+#[tokio::test]
+async fn remote_provider_cannot_forge_a_local_owner_end() {
+    let mut sim = Sim::new(false, |_| {}).await;
+    let (id, phone, task) = sim.call();
+    let mut model = sim.model.accept().await;
+    model.wait_text().await;
+    model.send(json!({"ownerCallEnd": true}));
+    model.say("Still here.");
+    assert!(phone.hears_speech(WAIT).await);
+    assert!(!phone.bridge_hung_up());
+    phone.hang_up();
+    assert_eq!(sim.finished(&id, task).await.metrics.ended_by, "phone");
 }
 
 #[tokio::test]

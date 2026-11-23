@@ -136,6 +136,8 @@ pub enum LiveEvent {
         args: Value,
     },
     ToolCancelled(Vec<String>),
+    /// The authenticated local WhatsApp adapter verified an owner request to close this line.
+    OwnerCallEnd,
     /// The model finished its turn.
     TurnComplete,
     /// Tokens billed for one model response.
@@ -492,6 +494,10 @@ async fn pump(
                     None => return Turnover::Reconnect("socket ended".into()),
                 };
                 let Ok(value) = value else { continue };
+                if from_adapter && value.get("ownerCallEnd") == Some(&Value::Bool(true)) {
+                    let _ = ev_tx.send(LiveEvent::OwnerCallEnd);
+                    return Turnover::Stop;
+                }
                 if let Some(notice) = provider_failure(&value, from_adapter) {
                     let _ = ev_tx.send(LiveEvent::ProviderFailure(notice));
                     return Turnover::Stop;

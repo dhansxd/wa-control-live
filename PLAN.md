@@ -35,6 +35,16 @@ lalu mengatur WhatsApp dan audio Live dari Hermes.
 
 ## Acuan perilaku telepon
 
+Dasar implementasi suara adalah Hermes Desktop Live dari Nous Research.
+Pakai instruksi percakapan Desktop dari runtime Hermes, konteks ucapan
+per giliran, pembaruan alat senyap, penyampaian hasil, dan perintah penutup
+Desktop. WhatsApp menyediakan audio, identitas nomor, dan sinyal putus.
+Sesi DM WhatsApp yang sedang aktif memiliki semua pekerjaan.
+Konektor Codex, Gemini dan endpoint lain tetap memakai format audio dan
+mekanisme login masing-masing. Pergantian koneksi meneruskan pekerjaan,
+progres alat dan tanda terima yang terikat pada sesi tersebut.
+Rujukan kode dan lisensi tersedia di [atribusi](THIRD_PARTY_NOTICES.md).
+
 ChatGPT Live di aplikasi Desktop menjadi pembanding untuk pengalaman
 pemilik. Panduan OpenAI menjelaskan percakapan yang bisa disela, penggunaan
 konteks tugas yang sudah ada, dan kemampuan berdiskusi, mengecek progres atau
@@ -59,16 +69,15 @@ aturan seperti menutup sendiri saat pekerjaan selesai atau saat hening.
 | Langkah atau file berubah saat tugas berjalan | Perkembangan dari tugas DM atau telepon yang sama otomatis masuk ke konteks suara secara senyap. Saat ditanya, Hermes bisa menyebut angka yang dilaporkan tool, kegagalan di aplikasi, atau file yang benar-benar berubah sebelum ada jawaban akhir di DM. Permintaan rincian kode membaca hasil edit dari tugas tersebut. Jika detail belum tersedia, sebut langkah terakhir yang bisa diverifikasi. |
 | Mulai bicara saat asisten sedang menjawab | Audio jawaban lama berhenti saat pemilik menyela, termasuk saat model selesai menghasilkan jawaban tetapi audio masih antre. Panggilan menerima ucapan baru. Tugas aktif tetap berjalan. |
 | Beri arahan baru untuk tugas tertentu | Cocokkan tugas yang dimaksud dan gunakan jalur perubahan arahan Hermes. Permintaan berhenti bicara, permintaan mengakhiri telepon, dan permintaan membatalkan tugas adalah tindakan yang berbeda. |
-| Minta asisten mengakhiri panggilan saat kerja masih berjalan | Asisten meminta WhatsApp benar-benar menutup panggilan setelah maksud pemilik terverifikasi. Salam penutup boleh selesai atau dilewati jika audio tidak tersedia. Ucapan susulan dapat menyela penutupan, dan tugas tetap berjalan di sesi DM yang sama. |
+| Minta asisten mengakhiri panggilan saat kerja masih berjalan | Perintah akhir yang jelas dari ucapan final pemilik memutus panggilan WhatsApp. Permintaan penutup yang sudah terverifikasi tetap berlaku meski ada audio susulan. Pekerjaan yang sudah diterima berlanjut di sesi DM yang sama. |
 | Minta ditelepon kembali | Permintaan pemilik dari telepon atau DM dapat menjadwalkan satu panggilan melalui cron Hermes. Bedakan permintaan yang baru masuk dari jadwal yang sudah tersimpan. Jika pemilik sekaligus berpamitan, pertahankan pekerjaan yang sudah diterima dan tutup panggilan saat ini sesuai maksudnya. |
 | Hasil atau kebutuhan persetujuan muncul saat sedang mengobrol | Sampaikan status yang benar tanpa merebut giliran pemilik. Sebut kebutuhan persetujuan saat Hermes benar-benar memerlukannya dan gunakan mekanisme persetujuan asli Hermes. |
 
-Pada jalur Codex, utamakan delegasi dari provider. Jika pemilik memberi
-permintaan tindakan dan Codex sudah menjawabnya langsung lewat suara, gunakan
-transkrip final pemilik untuk memeriksa apakah satu tugas masih perlu masuk
-ke sesi DM aktif. Pemeriksaan berlangsung sambil suara tetap berjalan. Pakai
-pemeriksaan maksud Hermes yang sama serta ID pengajuan yang sama jika
-delegasi menyusul. Akui pekerjaan berjalan berdasarkan status eksekusi, dan
+Pada jalur Codex, ucapan final pemilik memulai pemeriksaan maksud. Delegasi
+provider yang datang lebih awal atau menyusul memakai giliran dan ID
+pengajuan yang sama. Tanggapan seperti “iya, aku tunggu” mempertahankan
+permintaan asli. Pembatalan eksplisit sebelum tugas diterima ditinjau
+terhadap permintaan itu. Akui pekerjaan berjalan berdasarkan status eksekusi, dan
 pengiriman berdasarkan tanda terima pengirim untuk pesan atau berkas itu.
 Saat ditanya progres, gunakan temuan alat yang benar-benar sudah tersedia.
 

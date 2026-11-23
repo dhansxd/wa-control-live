@@ -426,3 +426,15 @@ def test_gpt_live_start_rejection_and_expired_session_report_safe_reasons(monkey
                 await connection.close()
 
     asyncio.run(exercise())
+
+
+def test_native_result_commentary_keeps_complete_sentences_within_wire_limit(monkeypatch):
+    import gpt_live_connection as link
+    monkeypatch.setattr(link, 'APPEND_BYTES', 56)
+    first = 'Gambarnya selesai dibuat.'
+    second = 'WhatsApp menerima permintaan pengiriman lampiran.'
+    assert [chunk.strip() for chunk in link._chunks(first + ' ' + second)] == [first, second]
+    oversized = '🌙' * 20
+    chunks = list(link._chunks(oversized))
+    assert ''.join(chunks) == oversized
+    assert all(len(chunk.encode()) <= 56 for chunk in chunks)

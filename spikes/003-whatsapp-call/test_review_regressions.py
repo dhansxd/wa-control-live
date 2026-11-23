@@ -313,3 +313,111 @@ def test_app_server_eof_or_broken_json_ends_call_promptly(tmp_path):
 
     asyncio.run(exercise('pass', tmp_path/'eof'))
     asyncio.run(exercise("print('not-json')", tmp_path/'broken-json'))
+
+
+def test_delivery_updates_are_projected_even_when_codex_parks_context(tmp_path, monkeypatch):
+    async def exercise():
+        voice = voice_fixture(tmp_path, monkeypatch, SimpleNamespace())
+        voice.active_reply_turn = 'still-speaking'
+        work = {'session_id': 'session-a', 'admission_id': 'a'*32, 'status': 'completed',
+                'text': 'Kirim satu foto di DM.', 'kind': 'voice_call'}
+        try:
+            previous = {'has_attachments': True, 'text_delivery': 'sent', 'media_delivery': 'unconfirmed'}
+            await voice.apply_chat_update({'work': [{**work, 'delivery': previous}]}, 0)
+            assert 'unconfirmed' in voice.grounded_work_context()
+            await voice.apply_chat_update({'work': [{**work, 'delivery': {**previous, 'media_delivery': 'sent'}}]}, 0)
+            current = voice.grounded_work_context()
+            assert '"media_delivery": "sent"' in current and 'unconfirmed' not in current
+            assert voice.deferred_work_snapshot
+            assert not voice.pending_work_speech
+            voice.chat_reconnecting = True
+            assert 'media_delivery' not in voice.grounded_work_context()
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(('observed_media', 'watched_media'), [('unconfirmed', 'sent'), ('sent', 'partial')])
+def test_attachment_spoken_after_a_pause_uses_its_latest_sender_receipt(tmp_path, monkeypatch, observed_media, watched_media):
+    async def exercise():
+        can_speak, waiting = asyncio.Event(), asyncio.Event()
+        output = []
+        aid = 'a' * 32
+        receipt = {'session_id': 'session-a', 'admission_id': aid}
+        observed_delivery = {'has_attachments': True, 'text_delivery': 'sent', 'media_delivery': observed_media}
+
+        async def observe(session_id, admission_id):
+            assert (session_id, admission_id) == ('session-a', aid)
+            return {**receipt, **observed_delivery, 'status': 'completed', 'output': 'Hasil memuat lampiran.'}
+
+        voice = voice_fixture(tmp_path, monkeypatch, SimpleNamespace(observe_work=observe))
+        monkeypatch.setattr(voice.connection.__class__, 'can_speak', property(lambda _: True))
+
+        def ready():
+            waiting.set()
+            return can_speak.is_set()
+
+        async def send(text):
+            output.append(text)
+            return True
+
+        voice.work_speech_ready = ready
+        voice.send_work_speech = send
+        work = {**receipt, 'status': 'completed', 'text': 'Buat gambar.'}
+        voice.update_dm_work([{**work, 'delivery': observed_delivery}])
+        try:
+            voice.watch_dm_work(aid, None, None)
+            await asyncio.wait_for(waiting.wait(), 1)
+            voice.update_dm_work([{**work, 'delivery': {**observed_delivery, 'media_delivery': watched_media}}])
+            can_speak.set()
+            await asyncio.wait_for(voice.work_followers[aid][0], 1)
+            assert len(output) == 1
+            assert 'menerima permintaan pengiriman semua lampiran' in output[0]
+            assert 'belum terkonfirmasi' not in output[0]
+        finally:
+            await voice.close()
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(('action', 'status', 'evidence'), [
+    ('delivery_status', 'completed', 'menerima permintaan pengiriman semua lampiran'),
+    ('follow', 'started', 'failed'),
+    ('follow', 'failed', 'gagal'),
+    ('code_changes', 'started', 'print(42)'),
+])
+def test_work_question_without_provider_proposal_supplies_quiet_native_evidence(tmp_path, monkeypatch, action, status, evidence):
+    async def exercise():
+        aid = 'a' * 32
+        scope = {'session_id': 'session-a', 'admission_id': aid}
+        steps = [{'tool': 'editor', 'status': 'failed', 'detail': 'example.py',
+                  'file_change': {'code_excerpt': 'print(42)'}}]
+        receipt = {**scope, 'status': status,
+                   'has_attachments': True, 'media_delivery': 'sent', 'tool_steps': steps}
+        quiet = []
+        received = asyncio.Event()
+
+        async def observe(session_id, admission_id, **options):
+            assert (session_id, admission_id) == ('session-a', aid)
+            assert options == ({'include_code': True} if action == 'code_changes' else {})
+            return receipt
+
+        async def append(texts, **_):
+            quiet.extend(texts)
+            received.set()
+
+        voice = voice_fixture(tmp_path, monkeypatch, SimpleNamespace(observe_work=observe))
+        voice.append_chat_context = append
+        voice.current_spoken_turn = 'owner'
+        voice.dm_work = [{**scope, 'status': receipt['status'], 'text': 'Kerjakan.'}]
+        voice.user_turns['owner'] = 'Bagaimana sekarang?'
+        try:
+            await voice.apply_voice_decision(None, 'owner', 'Bagaimana sekarang?', {
+                'status': action, 'admission_id': aid,
+            }, released_early=True)
+            await asyncio.wait_for(received.wait(), .5)
+            text = ' '.join(quiet)
+            assert evidence in text
+            assert not voice.pending_work_speech
+        finally:
+            await voice.close()
+    asyncio.run(exercise())

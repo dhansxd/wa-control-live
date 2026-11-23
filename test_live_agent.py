@@ -127,6 +127,24 @@ def test_voice_intent_uses_current_utterance_and_loaded_context_without_admittin
     assert gateway.calls == []
 
 
+def test_admission_review_cannot_authorize_action_from_a_later_utterance(tmp_path):
+    gateway = FakeGateway()
+    data = {'proposal': '', 'current': 'Aku tunggu.', 'previous': '', 'loaded_context': '',
+            'subsequent': ['Sekarang buat fotonya.']}
+
+    async def classify(**kwargs):
+        assert json.loads(kwargs['input'][0]['text']) == data
+        return SimpleNamespace(parsed={'action': 'task', 'evidence': data['subsequent'][0]})
+
+    decision = asyncio.run(live_agent._run(
+        tmp_path, '1234567890', {'action': 'route', 'session_id': 'session-a', **data},
+        resolve=gateway.resolve, connect=gateway.connect, read_work=lambda *_: [],
+        llm=SimpleNamespace(acomplete_structured=classify),
+    ))
+    assert decision == {'status': 'reply', 'work': []}
+    assert [method for method, _ in gateway.calls] == ['session.resume']
+
+
 @pytest.mark.parametrize('reset_at', [None, 'before', 'after', 'compaction'])
 def test_call_routes_once_with_fresh_dm_work_and_checks_session_again(tmp_path, reset_at):
     gateway = FakeGateway()
@@ -2259,3 +2277,92 @@ def test_invalid_requests_do_not_contact_hermes(tmp_path, request_data):
     with pytest.raises(ValueError):
         run(tmp_path, request_data, gateway)
     assert gateway.calls == []
+
+
+def test_watch_publishes_late_attachment_ack_without_another_chat_turn(tmp_path, monkeypatch):
+    async def exercise():
+        sid, aid = 'session-a', PHOTO_WORK['admission_id']
+        work = [{**PHOTO_WORK, 'status': 'started'}]
+        gateway = FakeGateway()
+        gateway.events = asyncio.Queue()
+        gateway.admissions['existing'] = {'admission_id': aid, 'ref': {'session_id': sid}}
+        gateway.receipt = {'status': 'terminal', 'outcome': 'completed',
+                           'result': {'final_response': 'Sudah terkirim.\nMEDIA:/tmp/private-photo.png'}}
+        receipts = []
+        ready = asyncio.Event()
+        delivered = asyncio.Event()
+        monkeypatch.setattr(live_agent, 'DELIVERY_REFRESH_SECONDS', 0.01, raising=False)
+
+        def read_media(_home, _owner, route, session, admission, output):
+            assert (route, session, admission) == (sid, sid, aid)
+            assert 'private-photo.png' in output
+            return 'sent' if ready.is_set() else 'unconfirmed'
+
+        def emit(event):
+            if event['status'] != 'ready':
+                return
+            delivery = event['work'][0].get('delivery')
+            if not delivery:
+                work[0] = {**work[0], 'status': 'completed'}
+                gateway.events.put_nowait({'method': 'event', 'params': {'type': 'session.info', 'session_id': sid}})
+                return
+            receipts.append(delivery)
+            assert 'private-photo' not in json.dumps(event) and 'Sudah terkirim' not in json.dumps(event)
+            if delivery['media_delivery'] == 'unconfirmed':
+                ready.set()
+            else:
+                delivered.set()
+
+        watcher = asyncio.create_task(live_agent._watch_context(
+            tmp_path, '1234567890', {'session_id': sid, 'after_row_id': 0}, resolve=gateway.resolve,
+            emit=emit, connect=gateway.connect, read_context_updates=lambda *_: ([], 0),
+            read_work=lambda *_: list(work), read_media_delivery=read_media))
+        try:
+            await asyncio.wait_for(delivered.wait(), 1)
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+        assert [r['media_delivery'] for r in receipts] == ['unconfirmed', 'sent']
+        assert len([1 for method, _ in gateway.calls if method == 'prompt.receipt']) == 1
+        assert all(method != 'prompt.submit' for method, _ in gateway.calls)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('problem', ['not_found', 'wrong_session', 'settling'])
+def test_work_delivery_observer_keeps_unreadable_receipts_out_of_later_status(tmp_path, problem):
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    async def exercise():
+        row = {**PHOTO_WORK, 'status': 'completed'}
+        class Gateway:
+            calls = 0
+            async def rpc(self, method, **params):
+                self.calls += 1
+                assert method == 'prompt.receipt'
+                if problem == 'not_found':
+                    raise GatewayRPCError('not_found')
+                return {'admission_id': row['admission_id'],
+                        'ref': {'session_id': 'different-dm' if problem == 'wrong_session' else 'session-a'},
+                        'status': 'started' if problem == 'settling' and self.calls == 1 else 'terminal',
+                        'outcome': 'completed', 'result': {'final_response': 'MEDIA:/private/a.png'}}
+        gateway = Gateway()
+        reads = []
+        def read_media(*_):
+            reads.append(1)
+            return 'sent'
+
+        watch = live_agent._DeliveryWatch(tmp_path, '1234567890', 'session-a', 'session-a', read_media)
+        first = await watch.refresh(gateway, [row], None)
+        assert first == [row]
+        if problem == 'settling':
+            # The native DB can commit terminal state before the gateway publishes the receipt.
+            assert watch.pending
+        second = await watch.refresh(gateway, [row], first)
+        if problem == 'settling':
+            assert second[0]['delivery']['media_delivery'] == 'sent'
+            assert reads == [1]
+        else:
+            assert gateway.calls == 1
+            assert second == [row] and not reads and not watch.pending
+    asyncio.run(exercise())

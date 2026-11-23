@@ -27,6 +27,10 @@ Contoh permintaan dari root repo:
 
 ## Baseline yang terakhir diuji
 
+- Perubahan Live tanggal 24 November memakai Hermes Desktop Live sebagai
+  dasar percakapan. Mulai verifikasi dari `test_desktop_live.py`,
+  `test_whatsapp_cold_delivery.py` dan `test_hangup.py`. Bukti pembanding,
+  skenario yang berubah, serta batas simulasi ada di [hasil verifikasi](STATUS.md#hasil-verifikasi).
 - Pada [`ea75123`](https://github.com/dhansxd/wa-control-live/commit/ea75123),
   permintaan tindakan yang dijawab langsung oleh Codex dapat masuk ke sesi
   WhatsApp Hermes yang aktif. Uji regresi membandingkan kandidat dengan
