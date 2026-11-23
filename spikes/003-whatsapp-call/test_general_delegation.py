@@ -1470,7 +1470,7 @@ def test_phone_follows_and_steers_one_dm_document_then_keeps_result_in_dm(
                 'status': 'started', 'kind': 'document', 'text': 'Rangkum dokumen ini.',
                 'seq': 2, 'attachment': True, 'files': [{'name': 'alur.pdf', 'mime': 'application/pdf'}]}
         observed, steered, announcements, responses = [], [], [], []
-        final = 'Ringkasan alur produksi yang asli.'
+        final = 'Ringkasan alur produksi yang asli. Gambar sudah tiba di ponselmu.'
         instructions = {
             'Sudah sampai mana?': 'follow',
             'Fokus ke alur produksinya.': 'steer',
@@ -1494,8 +1494,9 @@ def test_phone_follows_and_steers_one_dm_document_then_keeps_result_in_dm(
                 assert (session_id, admission_id) == (ACTIVE_WHATSAPP_SESSION, DM_ADMISSION_ID)
                 observed.append(admission_id)
                 return {'status': work['status'], 'session_id': session_id, 'admission_id': admission_id,
-                        'execution_generation': 3, 'output': final,
-                        'text_delivery': delivery_state, 'has_attachments': True}
+                        'execution_generation': 3, 'output': 'Hasil pekerjaan memuat lampiran.',
+                        'result_quote': final, 'text_delivery': delivery_state, 'has_attachments': True,
+                        'media_delivery': 'rejected'}
 
             async def steer_work(self, session_id, admission_id, text):
                 assert (session_id, admission_id) == (ACTIVE_WHATSAPP_SESSION, DM_ADMISSION_ID)
@@ -1547,7 +1548,7 @@ def test_phone_follows_and_steers_one_dm_document_then_keeps_result_in_dm(
             await asyncio.wait_for(routed.wait(), 1)
             work['status'] = 'completed'
             await voice.apply_chat_update({'work': [work.copy()], 'history_cursor': 1,
-                                           'history': [{'role': 'assistant', 'text': final}]}, 0)
+                                           'history': [{'role': 'assistant', 'text': 'Hasil pekerjaan memuat lampiran.'}]}, 0)
             await wait_until(lambda: voice.work_followers[DM_ADMISSION_ID][4] is None)
             assert not announcements and all(final not in text for _, text in responses)
             if speak_first:
@@ -1563,18 +1564,56 @@ def test_phone_follows_and_steers_one_dm_document_then_keeps_result_in_dm(
             await utter(4, items[3])
             await wait_until(lambda: any(item_id == 'p-4' for item_id, _ in responses))
             delivery = dict(responses)['p-4']
-            if delivery_state == 'sent':
-                assert 'Pengiriman lampiran belum terkonfirmasi' in delivery
-            else:
+            assert 'menolak' in delivery.lower()
+            if delivery_state == 'pending':
                 assert 'Pengiriman teks hasil ke DM masih dalam proses.' in delivery
             assert final not in dict(responses)['p-4']
             assert not announcements and not voice.offered_work_results
-            assert final in voice.loaded_context
+            assert final not in voice.loaded_context
             assert steered == [items[1]] and set(observed) == {DM_ADMISSION_ID}
             await utter(5, items[4])
             await wait_until(lambda: any(item_id == 'p-5' for item_id, _ in responses))
             assert final in dict(responses)['p-5']
-            assert 'pengiriman' not in dict(responses)['p-5'].lower()
+            assert 'kutipan' in dict(responses)['p-5'].lower()
+            assert 'menolak' in dict(responses)['p-5'].lower()
+        finally:
+            await voice.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(('state', 'fact'), [
+    ('sent', 'menerima permintaan pengiriman'),
+    ('partial', 'sebagian'),
+    ('rejected', 'menolak'),
+    ('unconfirmed', 'belum terkonfirmasi'),
+])
+def test_follow_existing_media_result_uses_transport_even_after_result_was_offered(tmp_path, monkeypatch, state, fact):
+    async def exercise():
+        caption = 'Ponselmu telah menerima semua gambar.'
+        work = {'session_id': ACTIVE_WHATSAPP_SESSION, 'admission_id': DM_ADMISSION_ID,
+                'status': 'completed', 'kind': 'text', 'text': 'Buat gambar.', 'seq': 1}
+        class Jobs(TranscriptJobs):
+            async def observe_work(self, session_id, admission_id):
+                return {'status': 'completed', 'session_id': session_id, 'admission_id': admission_id,
+                        'has_attachments': True, 'text_delivery': 'sent', 'media_delivery': state,
+                        'output': 'Hasil pekerjaan memuat lampiran.', 'result_quote': caption}
+
+        voice, _, _, appended = local_voice(tmp_path, monkeypatch, agent_jobs=Jobs())
+        voice.current_spoken_turn = 'caller'
+        voice.update_dm_work([work])
+        voice.offered_work_results.add(DM_ADMISSION_ID)
+        def receive(raw):
+            item = json.loads(raw)
+            appended.append(item)
+            voice.spawn(acknowledge(voice, item['delegation_item_id']))
+        voice.connection.channel.send = receive
+        try:
+            voice.watch_dm_work(DM_ADMISSION_ID, 'progress-question', 'caller')
+            await asyncio.wait_for(voice.work_followers[DM_ADMISSION_ID][0], 1)
+            text = appended[-1]['content'][0]['text']
+            assert caption not in text
+            assert fact in text.lower()
         finally:
             await voice.close()
 

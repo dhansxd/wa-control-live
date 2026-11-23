@@ -48,6 +48,7 @@ CONTEXT_PROGRESS_REPLAY_WINDOW = 96
 CONTEXT_PROGRESS_REPLAY_LIMIT = 12
 COMMENTARY_LIMIT = 3
 COMMENTARY_CHARS = 320
+ATTACHMENT_RESULT = 'Hasil pekerjaan memuat lampiran.'
 COMMENTARY_BOUNDARY = re.compile(r'(?<=[.!?])[ \t]+|\r?\n')
 COMMENTARY_PRIVATE = re.compile(
     r'media\s*:|\[\[|!\[|<img\b|```|'
@@ -105,7 +106,9 @@ CALL_INTENT_INSTRUCTIONS = (
     '"Mungkin bisa dicoba lagi karena tadi gagal?" is a reply. "Tolong coba lagi sekarang" '
     'clearly requests a retry. A polite request like "Bisa tolong buat ulang yang tadi?" is also '
     'a task. A question form alone does not determine intent. '
-    'Questions about whether an attachment arrived are ordinary replies if receipt is shown. '
+    'For an inbound attachment the DM history establishes what the caller sent. For outbound '
+    'delivery questions about images or files use delivery_status on the matching admission, even '
+    'when the assistant caption or conversation says it was sent. Those are not transport receipts. '
     'Use {"action":"attachment"} when the caller refers to a file from this WhatsApp DM and '
     'it is not listed in work. '
     'Use {"action":"follow","admission_id":"id"} when the caller asks for the progress '
@@ -288,7 +291,7 @@ def _read_history(home, session_id):
         # compaction summary. Archived originals belong to on-demand recall.
         rows = db.get_messages_as_conversation(session_id, repair_alternation=True, include_row_ids=True)
     history = _voice_history(
-        (row for row in rows if not model_only(row)),
+        (row for row in _auto_media_history(rows) if not model_only(row)),
         clean_text=BasePlatformAdapter.strip_media_directives_for_display,
         include_message_refs=True,
     )
@@ -305,6 +308,21 @@ def _read_context_updates(home, route_id, after_row_id):
         rows = db.get_messages(route_id, after_id=after_row_id, limit=24)
         if not rows:
             return [], after_row_id
+        prefix = []
+        if after_row_id and (rows[0]['role'] != 'user' or rows[0].get('display_kind')):
+            # A transcript page can begin at the final caption. Read only its
+            # preceding native tool rows in this same physical session/turn.
+            with db._read_ctx() as conn:
+                previous = conn.execute(
+                    """SELECT * FROM messages WHERE session_id=:sid AND active=1 AND id<=:cursor
+                       AND id>COALESCE((SELECT MAX(id) FROM messages WHERE session_id=:sid AND active=1
+                           AND id<=:cursor AND COALESCE(display_kind, '')='' AND
+                           (role='user' OR (role='assistant' AND COALESCE(tool_calls, '[]') IN ('', '[]')))), 0)
+                       AND COALESCE(display_kind, '')='' AND role IN ('assistant', 'tool', 'function')
+                       ORDER BY id""", {'sid': route_id, 'cursor': after_row_id},
+                ).fetchall()
+            prefix = [db._row_to_message_dict(row, warn_context='voice transcript', summary_flag=True)
+                      for row in previous]
         # Compaction can copy messages to fresh physical IDs. Check the
         # original durable message IDs only in this conversation's lineage.
         uids = {row['message_uid'] for row in rows if row.get('message_uid')}
@@ -318,7 +336,7 @@ def _read_context_updates(home, route_id, after_row_id):
                     f'SELECT DISTINCT message_uid FROM messages WHERE session_id IN ({sessions}) '
                     f'AND message_uid IN ({messages}) AND id <= ?', (*lineage, *uids, after_row_id),
                 )}
-    visible = (row for row in rows if row.get('message_uid') not in seen
+    visible = (row for row in _auto_media_history(rows, prefix) if row.get('message_uid') not in seen
                and row.get('display_kind') != VOICE_CALL_KIND and not model_only(row))
     history = _visible_history(visible, BasePlatformAdapter.strip_media_directives_for_display,
                                include_message_refs=True)
@@ -604,6 +622,7 @@ class _VoiceCommentary:
         self.segment = None
         self.offset = 0
         self.pending = ''
+        self.drafts = []
 
     def read(self, event, session_id, work):
         kind, seq = event.get('type'), event.get('seq')
@@ -616,11 +635,13 @@ class _VoiceCommentary:
         if kind == 'message.start':
             if self.binding is None or generation > self.binding[1]:
                 self.binding, self.segment, self.offset, self.pending, self.sent = binding, None, 0, '', 0
+                self.drafts.clear()
             return None
         if binding != self.binding:
             return None
         if kind == 'message.complete':
             self.segment, self.pending, self.sent = None, '', COMMENTARY_LIMIT
+            self.drafts.clear()
             return None
         if self.sent >= COMMENTARY_LIMIT or not any(
             row['admission_id'] == admission_id and row['session_id'] == session_id and row['status'] == 'started'
@@ -655,9 +676,20 @@ class _VoiceCommentary:
             return None
         from agent.redact import redact_sensitive_text
         self.sent += 1
-        return {'status': 'commentary', 'session_id': session_id, 'admission_id': admission_id,
-                'generation': generation, 'seq': seq,
-                'text': redact_sensitive_text(clean, force=True, redact_url_credentials=True)}
+        # A final attachment caption arrives on the same delta stream as interim
+        # prose. A subsequent tool call proves that this step was intermediate.
+        self.drafts.append({'status': 'commentary', 'session_id': session_id, 'admission_id': admission_id,
+                            'generation': generation, 'seq': seq,
+                            'text': redact_sensitive_text(clean, force=True, redact_url_credentials=True)})
+
+    def before_tool(self, progress):
+        if (self.binding == (progress['admission_id'], progress['generation'])
+                and self.seq < progress['seq']):
+            drafts, self.drafts = self.drafts, []
+            self.seq = progress['seq']
+            self.pending = ''
+            return drafts
+        return ()
 
 
 async def _watch_context(home, owner_number, request, *, resolve, emit, connect=_gateway,
@@ -742,14 +774,14 @@ async def _watch_context(home, owner_number, request, *, resolve, emit, connect=
                         if progress and progress['seq'] > last_tool_seq:
                             if await asyncio.to_thread(resolve, home, owner_number) != route_id:
                                 break
+                            if event_type == 'tool.start':
+                                for draft in commentary.before_tool(progress):
+                                    emit(draft)
                             emit(progress)
                             progress_visible = True
                             last_tool_seq = progress['seq']
                     if event_type in {'message.start', 'message.delta', 'message.complete'} and event_epoch == epoch:
-                        if update := commentary.read(event, session_id, previous_work):
-                            if await asyncio.to_thread(resolve, home, owner_number) != route_id:
-                                break
-                            emit(update)
+                        commentary.read(event, session_id, previous_work)
                     refresh = event_type in CONTEXT_WAKE_EVENTS
         except BrokenPipeError:
             return
@@ -889,7 +921,7 @@ def _read_recall(home, route_id, terms):
     with closing(SessionDB(home / 'state.db', read_only=True)) as db:
         rows = db.get_messages(route_id, include_ancestors=True, include_compacted=True)
     return _find_history(
-        (row for row in rows if not model_only(row)), terms,
+        (row for row in _auto_media_history(rows) if not model_only(row)), terms,
         clean_text=BasePlatformAdapter.strip_media_directives_for_display,
     )
 
@@ -906,6 +938,32 @@ def _read_persona(home):
     if persona and not persona.startswith('[BLOCKED: SOUL.md '):
         return persona[:VOICE_PERSONA_MAX_CHARS].rstrip()
     return getattr(prompts, 'DEFAULT_AGENT_IDENTITY', None)
+
+
+def _auto_media_history(rows, previous=()):
+    """Recognize a native caption saved before Hermes appended producer-tool attachments."""
+    tools = list(previous)
+    for row in rows:
+        role = row.get('role')
+        if not row.get('display_kind'):
+            if row.get('_compressed_summary') or role == 'user':
+                tools.clear()
+            elif role in ('tool', 'function') or (role == 'assistant' and row.get('tool_calls')):
+                tools.append(row)
+            elif role == 'assistant' and tools:
+                # Use Hermes' actual producer allowlist and tool-call ID binding.
+                try:
+                    from gateway.run import _collect_auto_append_media_tags
+                    media, _ = _collect_auto_append_media_tags(tools)
+                except (ImportError, AttributeError, TypeError, ValueError):
+                    # A missing gateway dependency or malformed stored call must
+                    # only affect this turn, without promoting its unverified caption.
+                    row = {**row, 'content': 'Detail hasil pekerjaan ini belum dapat diperiksa.'}
+                else:
+                    if media:
+                        row = {**row, 'content': ATTACHMENT_RESULT}
+                tools.clear()
+        yield row
 
 
 def _visible_history(rows, clean_text, *, include_message_refs=False):
@@ -928,7 +986,13 @@ def _visible_history(rows, clean_text, *, include_message_refs=False):
             content = '\n\n'.join(text_parts)
         if not isinstance(content, str):
             continue
-        text = clean_text(content).strip()
+        if role == 'assistant' and (attachments or _result_parts(content)[1]):
+            # A stored assistant caption describes its own request, not the outcome
+            # of the later WhatsApp send. The native DM row remains unchanged.
+            text = ATTACHMENT_RESULT
+            attachments.clear()
+        else:
+            text = clean_text(content).strip()
         if role == 'user' and "[The user sent an image" in text:
             text = PHOTO_DESCRIPTION.sub(r'Foto dari chat WhatsApp. Deskripsi gambar:\n\1', text)
             text = PHOTO_TOOL_HINT.sub('Foto dari chat WhatsApp. Isi belum tersedia.', text)
@@ -967,7 +1031,17 @@ def _voice_history(rows, *, clean_text=str.strip, include_message_refs=False):
     history = []
     for row in rows:
         if row.get('_compressed_summary') and isinstance(row.get('content'), str):
-            summary = clean_text(row['content']).strip()
+            content = row['content']
+            if _result_parts(content)[1]:
+                # Hermes compacts many messages into Markdown sections and list
+                # items. A caption in one entry says nothing about the other work.
+                entries = re.split(r'\n[ \t]*\n|(?=^[ \t]*(?:#{1,6}|[-*+]|\d+[.)])[ \t]+)', content, flags=re.M)
+                projected = [ATTACHMENT_RESULT if _result_parts(entry)[1] else clean_text(entry).strip()
+                             for entry in entries if entry.strip()]
+                summary = ('Ringkasan percakapan terdahulu. Periksa status pengiriman melalui layanan WhatsApp.\n'
+                           + '\n'.join(projected))
+            else:
+                summary = clean_text(content).strip()
             if summary:
                 history.append({'role': 'assistant', 'text': summary, 'summary': True})
         else:
@@ -1012,11 +1086,24 @@ def _result_parts(output):
     return cleaned.strip(), bool(media or images or files or text.strip() != visible)
 
 
-def _spoken_result(output, parts=None):
-    text, has_attachments = _result_parts(output) if parts is None else parts
+def _voice_result(home, owner_number, route_id, session_id, admission_id, output, read_media_delivery, *, observed):
+    text, has_attachments = _result_parts(output)
+    if not observed and not has_attachments:
+        return {'output': output}
+    result = {'has_attachments': has_attachments, 'output': ATTACHMENT_RESULT if has_attachments else output,
+              'text_delivery': _dm_text_delivery(home, owner_number, route_id, session_id, admission_id, text)}
     if has_attachments:
-        return ('Periksa DM untuk memastikan lampirannya diterima.\n' + text).rstrip()
-    return output
+        result['media_delivery'] = 'unconfirmed'
+        if read_media_delivery is not None:
+            try:
+                result['media_delivery'] = read_media_delivery(home, owner_number, route_id, session_id,
+                                                              admission_id, output)
+            except (OSError, sqlite3.Error):
+                pass
+        if observed and text:
+            # Only an explicit request to read the result may quote this text.
+            result['result_quote'] = text
+    return result
 
 
 def _dm_text_delivery(home, owner_number, route_id, session_id, admission_id, text):
@@ -1110,7 +1197,7 @@ async def _steer_work(client, binding, receipt, instruction):
 
 async def _run(home, owner_number, request, *, resolve, read_history=_read_history, read_recall=_read_recall,
                read_context_updates=_read_context_updates, save_exchange=save_voice_exchange,
-               read_work=_read_dm_work,
+               read_work=_read_dm_work, read_media_delivery=None,
                connect=_gateway, poll_seconds=120, llm=None, ensure_session=None, sign_submission=None):
     if not isinstance(request, dict):
         raise ValueError('Voice delegation must be a JSON object')
@@ -1334,9 +1421,9 @@ async def _run(home, owner_number, request, *, resolve, read_history=_read_histo
                             return {'status': 'unknown', **binding}
                     output = _completed_output(observed_receipt)
                     if output:
-                        text, has_attachments = _result_parts(output)
-                        delivery = await asyncio.to_thread(
-                            _dm_text_delivery, home, owner_number, current_route, session_id, observed_id, text,
+                        result = await asyncio.to_thread(
+                            _voice_result, home, owner_number, current_route, session_id, observed_id, output,
+                            read_media_delivery, observed=True,
                         )
                         latest_route = await asyncio.to_thread(resolve, home, owner_number)
                         if latest_route != current_route:
@@ -1344,10 +1431,10 @@ async def _run(home, owner_number, request, *, resolve, read_history=_read_histo
                                                       omit_messages=True, _timeout=5)
                             if latest['session_id'] != session_id:
                                 return {'status': 'session_changed'}
-                            delivery = 'unconfirmed'
-                        return {'status': 'completed', **binding, **details,
-                                'output': _spoken_result(output, (text, has_attachments)),
-                                'text_delivery': delivery, 'has_attachments': has_attachments}
+                            result['text_delivery'] = 'unconfirmed'
+                            if result['has_attachments']:
+                                result['media_delivery'] = 'unconfirmed'
+                        return {'status': 'completed', **binding, **details, **result}
                     outcome = observed_receipt.get('outcome')
                     return {'status': outcome if outcome in {'cancelled', 'interrupted'} else 'failed', **binding, **details}
                 if status == 'started':
@@ -1411,7 +1498,19 @@ async def _run(home, owner_number, request, *, resolve, read_history=_read_histo
                 if receipt['status'] == 'terminal':
                     output = _completed_output(receipt)
                     if output:
-                        return {**report, 'status': 'completed', 'output': _spoken_result(output)}
+                        result = await asyncio.to_thread(
+                            _voice_result, home, owner_number, current_route, session_id, admission_id, output,
+                            read_media_delivery, observed=False,
+                        )
+                        if result.get('has_attachments'):
+                            latest_route = await asyncio.to_thread(resolve, home, owner_number)
+                            if latest_route != current_route:
+                                latest = await client.rpc('session.resume', session_id=latest_route,
+                                                          omit_messages=True, _timeout=5)
+                                if latest['session_id'] != session_id:
+                                    return {'status': 'session_changed'}
+                                result.update(media_delivery='unconfirmed', text_delivery='unconfirmed')
+                        return {**report, 'status': 'completed', **result}
                     return {**report, 'status': 'failed'}
                 if receipt['status'] not in {'started', 'queued'}:
                     return {**report, 'status': 'unknown'}
@@ -1515,7 +1614,7 @@ def _realtime_secret(request, get_live_config):
     return result
 
 
-def run_cli(home, owner_number, *, resolve, llm=None, ensure_session=None, read_routing=None,
+def run_cli(home, owner_number, *, resolve, llm=None, ensure_session=None, read_routing=None, read_media_delivery=None,
             sign_submission=None, get_live_config=None):
     """Read one internal request and print its result or subscription updates."""
     def emit(result):
@@ -1531,7 +1630,8 @@ def run_cli(home, owner_number, *, resolve, llm=None, ensure_session=None, read_
             asyncio.run(_watch_context(home, owner_number, request, resolve=resolve, emit=emit, connect=connect))
             return
         result = asyncio.run(_run(home, owner_number, request, resolve=resolve, llm=llm,
-                                  ensure_session=ensure_session, connect=connect, sign_submission=sign_submission))
+                                  ensure_session=ensure_session, connect=connect, sign_submission=sign_submission,
+                                  read_media_delivery=read_media_delivery))
     except ValueError as exc:
         result = {'status': 'unsupported_input', 'error': str(exc)}
     emit(result)

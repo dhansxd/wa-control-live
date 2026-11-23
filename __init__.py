@@ -367,12 +367,14 @@ def _run(ctx, args):
         if get_config is not None:
             options['get_live_config'] = partial(get_config, "live")
         if pair:
+            from .whatsapp_media_delivery import read_media_delivery
             from .whatsapp_owner_authorization import record_live_submission
             from .whatsapp_gateway import voice_routing_reader, voice_session_creator
 
             options['ensure_session'] = voice_session_creator(ctx)
             options['read_routing'] = voice_routing_reader(ctx)
             options['sign_submission'] = partial(record_live_submission, ctx.state.data_dir / 'unified')
+            options['read_media_delivery'] = partial(read_media_delivery, ctx.state.data_dir / 'unified', bot)
         run_cli(home, owner, resolve=resolve_owner_session, llm=ctx.llm, **options)
         return
 

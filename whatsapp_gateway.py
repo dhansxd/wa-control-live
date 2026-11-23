@@ -14,11 +14,16 @@ from gateway.platforms.base import (
 )
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator
+from hermes_constants import get_hermes_dir, get_hermes_home
 
 if __package__:
+    from .plugin_identity import _phone as stock_whatsapp_phone
     from .rust_whatsapp_messages import SIDECAR, prepare_media, send_message
+    from .whatsapp_media_delivery import MediaDispatch, prepare_dispatch, record_attempt, streamed_dispatch
 else:
+    from plugin_identity import _phone as stock_whatsapp_phone
     from rust_whatsapp_messages import SIDECAR, prepare_media, send_message
+    from whatsapp_media_delivery import MediaDispatch, prepare_dispatch, record_attempt, streamed_dispatch
 
 _PHONE = re.compile(r"[1-9][0-9]{6,14}")
 _PERSON = re.compile(r"([0-9]{1,20})(?::[0-9]+)?@(s\.whatsapp\.net|lid)")
@@ -58,7 +63,8 @@ def _phone(value):
 
 
 class WhatsAppLiveAdapter(BasePlatformAdapter):
-    def __init__(self, config, owner, bot, token_path, *, endpoint=SIDECAR, transport_command=None):
+    def __init__(self, config, owner, bot, token_path, *, endpoint=SIDECAR, transport_command=None,
+                 profile_home=None):
         super().__init__(config, Platform.WHATSAPP)
         self.owner = owner
         self.bot = bot
@@ -72,6 +78,8 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
         # Hermes transfers native dedup caches when replacing an adapter.
         self.seen = MessageDeduplicator(max_size=512, ttl_seconds=float("inf"))
         self.owner_lid = None
+        self._profile_home = profile_home or get_hermes_home()
+        self._identity_dir = get_hermes_dir("platforms/whatsapp/session", "whatsapp/session", home=self._profile_home)
         self.transport_command = transport_command
         self._transport = None
         self._transport_paused = False
@@ -251,17 +259,26 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
         return self.build_source(chat_id=self.owner, user_id=self.owner, chat_type="dm",
                                  chat_id_alt=alias, user_id_alt=alias, message_id=message_id)
 
-    def _owner_recipient(self, chat_id):
+    async def _owner_recipient(self, chat_id):
         if not self.verified or self.http is None:
             return None
         if _phone(chat_id) == self.owner or (
             self.owner_lid is not None and chat_id == self.owner_lid
         ):
             return self.owner_lid or f"{self.owner}@s.whatsapp.net"
+        if isinstance(chat_id, str) and chat_id.endswith("@lid") and _PERSON.fullmatch(chat_id):
+            # A stock DM can retain its LID after restart. Require the profile's
+            # direct LID-to-phone mapping, then address the configured phone.
+            try:
+                mapped = await asyncio.to_thread(stock_whatsapp_phone, chat_id, self._identity_dir)
+            except RuntimeError:
+                return None
+            if mapped == self.owner and self.verified and self.http is not None:
+                return f"{self.owner}@s.whatsapp.net"
         return None
 
     async def send_typing(self, chat_id, metadata=None):
-        recipient = self._owner_recipient(chat_id)
+        recipient = await self._owner_recipient(chat_id)
         if recipient is None:
             return
         try:
@@ -274,7 +291,7 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
             logger.debug("WhatsApp typing update unavailable.")
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
-        recipient = self._owner_recipient(chat_id)
+        recipient = await self._owner_recipient(chat_id)
         if recipient is None:
             return SendResult(success=False, error="WhatsApp bot route is unavailable for this destination")
         try:
@@ -288,9 +305,19 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
             pass
         return SendResult(success=False, error="The WhatsApp sidecar did not confirm the reply")
 
-    async def _send_attachment(self, chat_id, path, kind, caption, filename=None):
-        recipient = self._owner_recipient(chat_id)
-        if recipient is None:
+    async def _deliver_attachments(self, event, extracted, metadata, *, anything_sent, record_delivery):
+        # v0.23.2 routes both the native DM waiter and settled Live admissions through
+        # this seam. Hermes passes metadata on to its current adapter after reconnect.
+        if extracted.images or extracted.media_files or extracted.local_files:
+            batch = await asyncio.to_thread(prepare_dispatch, self._profile_home, self.owner, event,
+                                            extracted.pre_extract)
+            if batch:
+                metadata = {**(metadata or {}), "wa_live_media_dispatch": batch}
+        return await super()._deliver_attachments(event, extracted, metadata, anything_sent=anything_sent,
+                                                  record_delivery=record_delivery)
+
+    async def _send_attachment(self, chat_id, path, kind, caption, filename=None, metadata=None):
+        if await self._owner_recipient(chat_id) is None:
             return SendResult(success=False, error="WhatsApp bot route is unavailable for this destination")
         runtime = self.token_path.parent
         try:
@@ -299,20 +326,30 @@ class WhatsAppLiveAdapter(BasePlatformAdapter):
             )
         except (OSError, ValueError, RuntimeError):
             return SendResult(success=False, error="This WhatsApp attachment could not be prepared")
-        if self._owner_recipient(chat_id) != recipient:
+        recipient = await self._owner_recipient(chat_id)
+        if recipient is None:
             return SendResult(success=False, error="WhatsApp bot route is unavailable for this destination")
         message_id = "3EB0" + uuid4().hex[:18].upper()
+        batch = metadata.get("wa_live_media_dispatch") if isinstance(metadata, dict) else None
+        try:
+            if batch is None and isinstance(metadata, dict) and metadata.get("notify") is True:
+                batch = await streamed_dispatch(self.gateway_runner, self._profile_home, self.owner, chat_id)
+            if isinstance(batch, MediaDispatch):
+                await asyncio.to_thread(record_attempt, runtime, self.bot, batch, source, recipient, message_id)
+        except Exception:
+            # Older Hermes runtimes can deliver media without the per-turn proof.
+            logger.debug("WhatsApp media receipt attribution unavailable.", exc_info=True)
         receipt = await send_message(self.http, runtime, self.bot, {**payload, "chat_id": recipient}, message_id, source)
         if receipt["status"] == "accepted":
             return SendResult(success=True, message_id=message_id)
         return SendResult(success=False, error="The WhatsApp sidecar did not confirm the attachment")
 
     async def send_image_file(self, chat_id, image_path, caption=None, reply_to=None, metadata=None, **kwargs):
-        return await self._send_attachment(chat_id, image_path, "image", caption)
+        return await self._send_attachment(chat_id, image_path, "image", caption, metadata=metadata)
 
     async def send_document(self, chat_id, file_path, caption=None, file_name=None, reply_to=None,
                             metadata=None, **kwargs):
-        return await self._send_attachment(chat_id, file_path, "document", caption, file_name)
+        return await self._send_attachment(chat_id, file_path, "document", caption, file_name, metadata)
 
     async def get_chat_info(self, chat_id):
         return {"name": chat_id, "type": "dm"}
@@ -387,7 +424,8 @@ def register_gateway(ctx, owner, bot, *, transport_command=None):
         return {"control_home": str(store._routing_home.resolve()), "scope": store._routing_scope()}
 
     def adapter_factory(config):
-        return WhatsAppLiveAdapter(config, owner, bot, token_path, transport_command=transport_command)
+        return WhatsAppLiveAdapter(config, owner, bot, token_path, transport_command=transport_command,
+                                   profile_home=home)
 
     register_whatsapp_platform(ctx, adapter_factory, token_path)
     ctx.register_rpc(_CREATE_VOICE_SESSION, create)

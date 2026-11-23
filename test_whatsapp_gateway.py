@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -348,6 +349,89 @@ def test_only_the_verified_owner_can_attach_media_to_the_active_dm(
         assert routed.source.chat_id == OWNER and routed.source.user_id == OWNER
         assert routed.message_type == kind and routed.media_types == [mime]
         assert routed.media_urls == [str(tmp_path / f"attachment{ext}")]
+
+    asyncio.run(exercise())
+
+
+def test_cold_reply_requires_a_direct_owner_lid_mapping_in_the_adapters_profile(tmp_path, monkeypatch):
+    from hermes_constants import get_hermes_dir
+
+    def map_lid(home, lid, phone):
+        directory = get_hermes_dir("platforms/whatsapp/session", "whatsapp/session", home=home)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"lid-mapping-{lid}_reverse.json").write_text(json.dumps(phone))
+
+    home, other = tmp_path / "profile", tmp_path / "other"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    map_lid(home, "4021", OWNER)
+    map_lid(home, "4022", BOT)
+    map_lid(other, "4022", OWNER)
+    adapter = WhatsAppLiveAdapter(PlatformConfig(), OWNER, BOT, home / "adapter.token")
+    monkeypatch.setenv("HERMES_HOME", str(other))
+
+    posted = []
+    @asynccontextmanager
+    async def post(path, *, json, **kwargs):
+        posted.append((path, json["chat_id"]))
+        yield SimpleNamespace(raise_for_status=lambda: None, json=AsyncMock(return_value={"message_id": "sent"}))
+
+    async def exercise():
+        adapter.http = SimpleNamespace(post=post)
+        assert not (await adapter.send(LID, "Belum siap.")).success
+        adapter.verified = True
+        for chat in ("4022@lid", "4023@lid", f"{OWNER}@lid", "4021@g.us"):
+            assert not (await adapter.send(chat, "Jangan dikirim.")).success
+        assert (await adapter.send(LID, "Hasil panggilan.")).success
+        assert posted == [("/owner/messages", f"{OWNER}@s.whatsapp.net")]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("during_prepare", ["owner-dm", "mapping-removed"])
+def test_cold_attachment_rechecks_owner_when_the_route_changes(tmp_path, monkeypatch, during_prepare):
+    from pathlib import Path
+    import whatsapp_gateway as gateway
+
+    home = tmp_path / "profile"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    identity = home / "platforms/whatsapp/session"
+    identity.mkdir(parents=True)
+    mapping = identity / "lid-mapping-4021_reverse.json"
+    mapping.write_text(json.dumps(OWNER))
+    document = tmp_path / "hasil.txt"
+    document.write_text("Selesai.")
+    adapter = WhatsAppLiveAdapter(PlatformConfig(), OWNER, BOT, home / "unified/adapter.token")
+    adapter.token_path.parent.mkdir()
+    monkeypatch.setattr(adapter, "handle_message", AsyncMock())
+    sent = []
+
+    @asynccontextmanager
+    async def post(path, *, json, **kwargs):
+        sent.append((path, json["chat_id"], Path(json["path"]).read_text()))
+        result = {"status": "accepted", "message_id": json["message_id"]}
+        yield SimpleNamespace(status=200, json=AsyncMock(return_value=result))
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        prepare = gateway.prepare_media
+
+        def prepare_during_change(*args, **kwargs):
+            if during_prepare == "owner-dm":
+                event = {"id": "first-inbound", "text": "Halo", "chat_id": LID,
+                         "sender_id": LID, "sender_id_alt": f"{OWNER}@s.whatsapp.net"}
+                asyncio.run_coroutine_threadsafe(adapter._receive_message(event), loop).result(5)
+            else:
+                mapping.unlink()
+            return prepare(*args, **kwargs)
+
+        adapter.verified = True
+        adapter.http = SimpleNamespace(post=post)
+        monkeypatch.setattr(gateway, "prepare_media", prepare_during_change)
+        result = await adapter.send_document(LID, str(document))
+        if during_prepare == "owner-dm":
+            assert result.success and sent == [("/messages", LID, "Selesai.")]
+        else:
+            assert not result.success and not sent
 
     asyncio.run(exercise())
 

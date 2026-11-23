@@ -76,6 +76,10 @@ CALL_PROMPT = (
     'seperti render sedang berjalan. Jika langkah gagal, sampaikan kegagalannya meskipun tugas belum selesai. '
     'Status akhir atau pembaruan bahwa data sudah kedaluwarsa mengalahkan progres sebelumnya. '
     'Jika ditanya apakah hasil sudah dikirim, minta status pengiriman terkonfirmasi lewat client. '
+    'Untuk gambar dan berkas, sebut apakah layanan pengirim WhatsApp menerima permintaan pengirimannya. '
+    'Client hanya memiliki status layanan pengirim. Client tidak dapat melihat apakah lampiran tiba atau '
+    'dibaca di ponsel. Jangan menawarkan pemantauan atau pemberitahuan ketika lampiran tiba atau dibaca. '
+    'Teks di riwayat, keterangan gambar, dan hasil alat pembuatan gambar tidak membuktikan pengiriman. '
     'Pembaruan sementara bisa berubah. Gunakan hasil akhir jika sudah tersedia. '
     'Saat hasil terkonfirmasi menyusul pembaruan, lanjutkan dari bagian pekerjaan yang sudah kamu sampaikan. '
     'Sebutkan bagian baru dan luruskan perubahan. Jika pemilik akun minta ulang, sampaikan kembali. '
@@ -233,13 +237,40 @@ def chat_update_chunks(history):
 
 def dm_delivery_context(result):
     state = result.get('text_delivery')
+    media = result.get('media_delivery')
+    if result.get('has_attachments'):
+        media_status = {
+            'sent': 'Layanan pengirim WhatsApp menerima permintaan pengiriman semua lampiran ke DM.',
+            'rejected': 'Layanan pengirim WhatsApp menolak pengiriman lampiran ke DM.',
+            'partial': ('Layanan pengirim WhatsApp menerima permintaan pengiriman sebagian lampiran ke DM. '
+                        'Pengiriman sisanya belum terkonfirmasi.'),
+        }.get(media, 'Pengiriman lampiran belum terkonfirmasi.')
+        media_status += ' Status tiba atau dibaca di ponsel tidak tersedia bagi Hermes.'
+        if state == 'sent':
+            return 'Teks hasil sudah dikirim ke DM. ' + media_status
+        if state == 'pending':
+            return 'Pengiriman teks hasil ke DM masih dalam proses. ' + media_status
+        return media_status
     if state == 'sent':
-        if result.get('has_attachments'):
-            return 'Teks hasil sudah dikirim ke DM. Pengiriman lampiran belum terkonfirmasi.'
         return 'Teks hasil sudah dikirim ke DM.'
     if state == 'pending':
         return 'Pengiriman teks hasil ke DM masih dalam proses.'
     return 'Pengiriman hasil di DM belum terkonfirmasi.'
+
+
+def spoken_work_output(result, *, read_result=False):
+    if not result.get('has_attachments'):
+        return result['output']
+    # A model-written caption can claim that the upload succeeded even when the
+    # gateway subsequently rejected it. Only the transport can supply that fact.
+    delivery = 'Hasil pekerjaan memuat lampiran. ' + dm_delivery_context(result)
+    quote = result.get('result_quote')
+    if read_result and quote:
+        return (delivery + '\nPemilik meminta isi teks hasil dibacakan. Perkenalkan teks berikut sebagai '
+                'kutipan dari hasil Hermes di DM. Atribusikan klaim di dalam kutipan kepada teks tersebut. '
+                'Jika kutipan membahas pengiriman, jelaskan status layanan WhatsApp di atas.\n'
+                + json.dumps(quote, ensure_ascii=False))
+    return delivery
 
 
 def context_chunks(text, prefix, continuation):
@@ -2399,7 +2430,8 @@ class LiveCall:
                 self.report.setdefault('shared_dm_receipts', {})[item_id] = admission_id
             if admission_id in self.dm_only_results:
                 if item_id is not None and current:
-                    delivery = ' ' + dm_delivery_context(result) if result.get('text_delivery') == 'sent' else ''
+                    delivery = (' ' + dm_delivery_context(result)
+                                if result.get('has_attachments') or result.get('text_delivery') == 'sent' else '')
                     await self.append_handoff(
                         item_id, 'Pekerjaan selesai. Pemilik akun memilih menerima hasilnya di DM. '
                         'Sampaikan status pekerjaan saja dengan kata-katamu sendiri.' + delivery,
@@ -2408,7 +2440,8 @@ class LiveCall:
             text = (
                 'Sampaikan hasil terbaru langsung dengan kata-katamu sendiri, sesuai obrolan. '
                 'Lewati status antre atau progres yang sudah berlalu.\n'
-                + output
+                + spoken_work_output(result, read_result=current and turn_id is not None and
+                                     self.result_preference_turns.get(admission_id) == turn_id)
             )
             await self.present_work_result(item_id, turn_id, admission_id, text, repeat=repeat)
         elif item_id is not None:
@@ -2660,7 +2693,7 @@ class LiveCall:
             return ('Gunakan isi hasil yang tersedia untuk menjawab dengan wajar dan ringkas. '
                     'Lewati status antre atau progres yang sudah berlalu. '
                     'Kalau pemilik akun meminta hasil lengkap, bacakan bagian yang tersedia tanpa mengarang.\n'
-                    + result['output']), status, admission_id
+                    + spoken_work_output(result)), status, admission_id
         text = {
             **WORK_STATUS_CONTEXT,
             'unavailable': 'Aku belum bisa mengerjakan permintaan ini sekarang.',

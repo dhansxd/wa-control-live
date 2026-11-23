@@ -277,7 +277,8 @@ def test_one_voice_task_uses_stock_whatsapp_delivery_for_mixed_files(tmp_path, m
     gateway.receipt['result']['final_response'] = output
     result = run(tmp_path, {**FIRST, 'text': 'Buat dan kirim empat lampirannya ke sini.'}, gateway)
     assert result['status'] == 'completed'
-    assert result['output'] == 'Periksa DM untuk memastikan lampirannya diterima.'
+    assert result['has_attachments'] and result['media_delivery'] == 'unconfirmed'
+    assert 'lampiran' in result['output'].lower() and 'MEDIA:' not in result['output']
     assert [method for method, _ in gateway.calls] == ['session.resume', 'prompt.submit', 'prompt.receipt']
     submitted = gateway.calls[1][1]
     assert submitted['text'] == 'Buat dan kirim empat lampirannya ke sini.'
@@ -311,8 +312,145 @@ def test_spoken_result_reuses_native_image_and_file_extraction(tmp_path):
     pytest.importorskip('hermes_state')
     file = tmp_path / 'Catatan.pdf'
     file.touch()
-    result = live_agent._spoken_result(f'Ini hasilnya.\n![Diagram](https://example.org/diagram.png)\n{file}')
-    assert result == 'Periksa DM untuk memastikan lampirannya diterima.\nIni hasilnya.'
+    gateway = FakeGateway()
+    gateway.receipt['result']['final_response'] = f'Ini hasilnya.\n![Diagram](https://example.org/diagram.png)\n{file}'
+    result = run(tmp_path, FIRST, gateway)
+    assert result['has_attachments'] and result['media_delivery'] == 'unconfirmed'
+    assert 'https://' not in result['output'] and str(file) not in result['output']
+
+
+def test_caption_is_not_an_announcement_in_blocking_submit_or_dm_history(tmp_path):
+    SessionDB = pytest.importorskip('hermes_state').SessionDB
+    from contextlib import closing
+
+    caption = 'Gambar sudah kukirim ke WhatsApp kamu.'
+    output = caption + '\nMEDIA:/fixture/gambar.png'
+    gateway = FakeGateway()
+    gateway.receipt['result']['final_response'] = output
+    result = run(tmp_path, FIRST, gateway)
+    assert result['status'] == 'completed'
+    assert caption not in result['output']
+    assert result['has_attachments'] and result['media_delivery'] == 'unconfirmed'
+
+    with closing(SessionDB(tmp_path / 'state.db')) as db:
+        db.create_session('session-a', 'whatsapp')
+        db.append_message('session-a', 'user', 'Mana gambar kapal?')
+        db.append_message('session-a', 'assistant', output, message_uid='picture')
+        assert db.get_messages('session-a')[-1]['content'] == output
+    for history in (live_agent._read_history(tmp_path, 'session-a')[0],
+                    live_agent._read_context_updates(tmp_path, 'session-a', 0)[0],
+                    live_agent._read_recall(tmp_path, 'session-a', ['kapal'])):
+        assert history[0]['text'] == 'Mana gambar kapal?'
+        assert history[1]['role'] == 'assistant' and 'lampiran' in history[1]['text'].lower()
+        assert caption not in history[1]['text'] and '/fixture' not in history[1]['text']
+    compressed = live_agent._voice_history([{'role': 'assistant', 'content': output, '_compressed_summary': True}])
+    assert compressed[0]['summary'] and caption not in compressed[0]['text']
+
+
+@pytest.mark.parametrize('reader', ['startup', 'after_tool', 'after_tool_before_call_mirror', 'recall'])
+def test_auto_appended_media_caption_is_private_to_its_persisted_turn(tmp_path, reader):
+    from contextlib import closing
+    from gateway.run_turn_runner import TurnRunner
+    from hermes_state import SessionDB
+
+    claim = 'Gambar kapal sudah kukirim ke WhatsApp kamu.'
+    tool_calls = [{'id': 'drawing', 'type': 'function',
+                   'function': {'name': 'image_generate', 'arguments': '{}'}}]
+    turn = [{'role': 'user', 'content': 'Gambarkan kapal kenanga.'},
+            {'role': 'assistant', 'content': '', 'tool_calls': tool_calls},
+            {'role': 'tool', 'tool_call_id': 'drawing',
+             'content': json.dumps({'success': True, 'image': '/fixture/kapal.png'})},
+            {'role': 'assistant', 'content': claim}]
+    assert 'MEDIA:/fixture/kapal.png' in TurnRunner._append_auto_media_tags(None, claim, {'messages': turn}, [], set())
+    with closing(SessionDB(tmp_path / 'state.db')) as db:
+        db.create_session('chat', 'whatsapp')
+        db.create_session('other', 'whatsapp')
+        ids = [db.append_message('chat', **row) for row in turn[:3]]
+        if reader == 'after_tool_before_call_mirror':
+            db.append_message('chat', 'user', 'Obrolan di telepon.', display_kind=live_agent.VOICE_CALL_KIND)
+        ids.append(db.append_message('chat', **turn[-1]))
+        db.append_message('chat', 'user', 'Siapa yang menentukan warna kapal kenanga?')
+        db.append_message('chat', 'assistant', 'Raka memilih warna biru.')
+        db.append_message('other', 'user', 'Apa contoh caption untuk kapal kenanga?')
+        db.append_message('other', 'assistant', claim)
+        assert any(row['id'] == ids[-1] and row['content'] == claim for row in db.get_messages('chat'))
+    if reader == 'startup':
+        history = live_agent._read_history(tmp_path, 'chat')[0]
+    elif reader.startswith('after_tool'):
+        history = live_agent._read_context_updates(tmp_path, 'chat', ids[2])[0]
+    else:
+        history = live_agent._read_recall(tmp_path, 'chat', ['kenanga'])
+    answers = [item['text'] for item in history if item['role'] == 'assistant']
+    assert answers == ['Hasil pekerjaan memuat lampiran.', 'Raka memilih warna biru.']
+    assert live_agent._read_history(tmp_path, 'other')[0][-1]['text'] == claim
+
+
+@pytest.mark.parametrize('failure', [ImportError('optional collector dependency'), TypeError('damaged call')])
+def test_unreadable_tool_attachment_details_keep_the_rest_of_voice_history(tmp_path, monkeypatch, failure):
+    from contextlib import closing
+    from hermes_state import SessionDB
+    from gateway import run as native
+
+    def unreadable(_tools):
+        raise failure
+
+    monkeypatch.setattr(native, '_collect_auto_append_media_tags', unreadable)
+    with closing(SessionDB(tmp_path / 'state.db')) as db:
+        db.create_session('chat', 'whatsapp')
+        db.append_message('chat', 'user', 'Buat gambar kapal.')
+        db.append_message('chat', 'assistant', '', tool_calls=[
+            {'id': 'draw', 'function': {'name': 'image_generate', 'arguments': '{}'}}])
+        db.append_message('chat', 'tool', 'Alat selesai.', tool_call_id='draw')
+        db.append_message('chat', 'assistant', 'File sudah tiba di ponselmu.')
+        db.append_message('chat', 'user', 'Apa warnanya?')
+        db.append_message('chat', 'assistant', 'Biru.')
+    rows, _ = live_agent._read_history(tmp_path, 'chat')
+    text = ' '.join(row['text'] for row in rows)
+    assert 'tiba di ponselmu' not in text and 'Biru.' in text and 'Apa warnanya?' in text
+
+
+@pytest.mark.parametrize('action', ['submit', 'observe_work'])
+def test_completed_binding_queries_media_receipt_with_original_mixed_response(tmp_path, action):
+    gateway = FakeGateway()
+    admission_id = PHOTO_WORK['admission_id']
+    gateway.admissions[FIRST['submission_id']] = {'admission_id': admission_id, 'ref': {'session_id': 'session-a'}}
+    output = 'Gambar sudah tiba di ponselmu.\nMEDIA:/fixture/gambar.png'
+    gateway.receipt['result']['final_response'] = output
+    reads = []
+
+    def media_receipt(*args):
+        reads.append(args)
+        return 'rejected'
+
+    request = FIRST if action == 'submit' else {
+        'action': action, 'session_id': 'session-a', 'admission_id': admission_id,
+    }
+    actual = asyncio.run(live_agent._run(
+        tmp_path, '1234567890', request, resolve=gateway.resolve, connect=gateway.connect,
+        read_work=lambda *_: [PHOTO_WORK], read_media_delivery=media_receipt,
+    ))
+    assert reads == [(tmp_path, '1234567890', 'session-a', 'session-a', admission_id, output)]
+    assert actual['status'] == 'completed' and actual['media_delivery'] == 'rejected'
+    assert 'ponselmu' not in actual['output'] and 'MEDIA:' not in actual['output']
+    if action == 'observe_work':
+        assert actual['result_quote'] == 'Gambar sudah tiba di ponselmu.'
+
+
+@pytest.mark.parametrize(('logical_session', 'status'), [('session-a', 'completed'), ('new-chat', 'session_changed')])
+def test_route_change_during_media_receipt_keeps_only_the_same_conversation(tmp_path, logical_session, status):
+    gateway = FakeGateway()
+    gateway.receipt['result']['final_response'] = 'Ini hasilnya.\nMEDIA:/fixture/gambar.png'
+
+    def media_receipt(*_args):
+        gateway.active_session = 'new-physical-session'
+        gateway.logical_session = logical_session
+        return 'sent'
+
+    actual = asyncio.run(live_agent._run(tmp_path, '1234567890', FIRST, resolve=gateway.resolve,
+                                         connect=gateway.connect, read_media_delivery=media_receipt))
+    assert actual['status'] == status
+    if status == 'completed':
+        assert actual['media_delivery'] == 'unconfirmed'
 
 
 def test_call_uses_the_dm_whose_context_it_opened(tmp_path, monkeypatch):
@@ -439,6 +577,23 @@ def test_voice_context_includes_the_active_summary_and_conversation():
         {'role': 'user', 'text': 'Earlier call', 'source': 'whatsapp_call'},
         {'role': 'assistant', 'text': 'Chat reply'},
     ]
+
+
+def test_compacted_voice_history_keeps_other_sections_and_neighboring_list_items():
+    caption = 'Gambar sudah tiba di ponsel pemilik.'
+    content = ('## Goal\nNadia menyiapkan katalog tenun.\n\n'
+               '## Completed Actions\n1. Pemilik memilih warna biru.\n'
+               f'2. {caption}\n   MEDIA:/fixture/tenun.png\n'
+               '3. Tenggat cetak disepakati hari Jumat.\n\n'
+               '## Active State\nRaka sedang memeriksa harga.')
+    history = live_agent._voice_history([{'role': 'assistant', '_compressed_summary': True, 'content': content}])
+    summary, = history
+    assert summary['summary']
+    for fact in ('Nadia menyiapkan katalog tenun.', 'Pemilik memilih warna biru.',
+                 'Tenggat cetak disepakati hari Jumat.', 'Raka sedang memeriksa harga.'):
+        assert fact in summary['text']
+    assert caption not in summary['text'] and '/fixture' not in summary['text']
+    assert 'lampiran' in summary['text'].lower()
 
 
 def test_context_updates_use_the_active_chat_without_reloading_persona_or_submitting(tmp_path, monkeypatch):
@@ -828,7 +983,12 @@ def test_context_watcher_projects_only_complete_safe_commentary_from_the_active_
         next_offset = len(first.encode('utf-16-le')) // 2
         second = 'menemukan sumber. Aku mengecek '
         third_offset = next_offset + len(second)
-        third = 'detail. MEDIA: /Users/private/my file. Jangan diucapkan. '
+        third = 'detail. /Users/private/my-file. Jangan diucapkan. '
+
+        def tool_start(seq, generation):
+            tool = event(seq, 'tool.start', generation=generation)
+            tool['params']['payload'] = {'tool_id': f'read-{seq}', 'name': 'read_file'}
+            return tool
 
         def emit(update):
             nonlocal physical
@@ -844,12 +1004,17 @@ def test_context_watcher_projects_only_complete_safe_commentary_from_the_active_
                     event(15, 'message.delta', text=second, offset=next_offset),
                     event(16, 'message.delta', text=third, offset=third_offset),
                     event(17, 'message.delta', text='Susulan rahasia. ', offset=third_offset + len(third)),
-                    event(18, 'message.complete'),
-                    event(19, 'message.start', generation=10),
-                    event(20, 'message.delta', text='Sudah berganti sesi. ', generation=10),
+                    tool_start(18, 9),
+                    event(19, 'message.complete'),
+                    event(20, 'message.start', generation=10),
+                    event(21, 'message.delta', text='Ponselmu telah menerima gambarnya. ', generation=10),
+                    event(22, 'message.delta', text='MEDIA:/fixture/gambar.png', offset=35, generation=10),
+                    event(23, 'message.complete', generation=10),
+                    tool_start(24, 10),
+                    event(25, 'message.start', generation=11),
                 ):
                     events.put_nowait(frame)
-            if update.get('text') == 'Aku mengecek detail.':
+            if update.get('seq') == 24:
                 physical = 'session-b'
 
         await asyncio.wait_for(live_agent._watch_context(
@@ -859,7 +1024,7 @@ def test_context_watcher_projects_only_complete_safe_commentary_from_the_active_
             read_work=lambda *_: [PHOTO_WORK],
         ), 2)
 
-        assert emitted[1:-1] == [
+        assert [update for update in emitted if update.get('status') == 'commentary'] == [
             {'status': 'commentary', 'session_id': 'session-a', 'admission_id': admission_id,
              'generation': 9, 'seq': 15, 'text': '📷 Aku sudah menemukan sumber.'},
             {'status': 'commentary', 'session_id': 'session-a', 'admission_id': admission_id,
@@ -1284,7 +1449,11 @@ def test_observe_matches_text_delivery_without_assuming_file_delivery(
                             'admission_id': admission_id}, gateway)
     assert actual['status'] == 'completed' and actual['text_delivery'] == expected
     assert actual['has_attachments'] is mixed
-    assert result in actual['output'] and 'MEDIA:' not in actual['output']
+    if mixed:
+        assert actual['media_delivery'] == 'unconfirmed'
+        assert actual['result_quote'] == result and result not in actual['output']
+    else:
+        assert actual['output'] == result
     assert [method for method, _ in gateway.calls] == ['session.resume', 'prompt.receipt']
 
 
