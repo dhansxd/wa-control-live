@@ -24,6 +24,12 @@ Untuk melanjutkan pengembangan, buka [handoff](HANDOFF.md),
 Dasar plugin sebelum perubahan adalah `8ff07d3`. Perbandingan memakai Hermes
 v0.23.2 (`ae2a81c`), macOS 27.2.1 arm64, Python 3.12.15 dan Node 22.23.5.
 Sumber Desktop dan lisensinya tercantum di [atribusi](THIRD_PARTY_NOTICES.md).
+Pada [commit implementasi](https://github.com/dhansxd/wa-control-live/commit/7e31ff748ef56178d577a0aed73bd825577ba671),
+971 tes Python dan 17 subtes lulus, termasuk simulasi gateway asli dan penggantian
+provider di tengah panggilan. Tujuh tes Node dan lima tes delegasi bawaan
+Hermes Desktop lulus. Pada sidecar Rust, 96 tes lulus dan tujuh tes bertanda
+`ignored`. Verifikasi sumber, SHA-256 binary dan `codesign --verify --strict`
+lulus untuk paket macOS arm64.
 
 | Skenario identik | Sebelum | Kandidat |
 | --- | --- | --- |
