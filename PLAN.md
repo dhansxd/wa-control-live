@@ -429,6 +429,14 @@ dan penutupan regresi yang memblokir rilis.
 
 ### Status kandidat
 
+- [x] Setelah gateway dimulai ulang, permintaan gambar lewat Live memakai sesi
+  DM pemilik yang sama, termasuk jika alamat tersimpan berupa LID dan belum ada
+  DM baru. Uji transport mencakup penerimaan gambar, penolakan setelah teks
+  terkirim, dan pertanyaan pemilik saat unggahan berlangsung.
+  [Hasil regresi](STATUS.md#telepon-pertama-setelah-restart-dan-pengiriman-gambar)
+- [ ] Ulangi di WhatsApp pemilik. Langsung telepon setelah restart, minta satu
+  gambar, lalu periksa gambar di DM dan jawaban suara saat panggilan masih terbuka.
+
 | Fitur | Status kode | Bukti saat ini |
 | --- | --- | --- |
 | Plugin gabungan dan jalur QR terminal | Baseline tersedia | Uji lifecycle dan pairing sintetis |

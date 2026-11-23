@@ -212,6 +212,93 @@ tidak menyelesaikan transkrip pertama setelah pengakuan delegasi. Percobaan itu
 belum mencapai skenario jawaban ganda. Regresi lokal lulus 800 tes Python,
 17 subtes, dan 7 tes Baileys. Uji ulang versi perbaikan pada ponsel tetap terbuka.
 
+### Telepon pertama setelah restart dan pengiriman gambar
+
+Pada panggilan pemilik 23 November 2026 dengan `907e804`, permintaan lewat
+telepon, hasil alat gambar, ucapan Live, dan DM berikutnya memiliki ID sesi
+Hermes yang sama. Alat selesai pukul 01.10.39 WIB. Lima detik kemudian adapter
+menolak pengiriman teks dan gambar ke alamat `@lid` milik sesi lama. Live
+mengatakan gambar sudah dikirim pukul 01.11.12. DM pemilik masuk pukul
+01.11.40, lalu pengiriman gambar terkonfirmasi pukul 01.11.48.
+
+[Regresi pengiriman gambar](test_whatsapp_cold_delivery.py) memakai profil
+sementara, dua instans gateway berturut-turut, dan sesi DM yang sudah ada.
+Permintaan Live masuk melalui penerimaan tugas asli Hermes. Pengganti model
+menulis PNG uji dan server HTTP lokal mencatat teks serta isi gambar yang diterimanya.
+Hasil pada snapshot Git `9f99925`, `907e804`, dan sumber yang terpasang
+di profil default identik. Setiap kasus mengeksekusi satu tugas di sesi awal.
+
+| Alamat sesi tersimpan | Kondisi setelah restart | Teks dan gambar di transport uji |
+| --- | --- | --- |
+| LID pemilik | Langsung telepon | Gagal, keduanya ditolak sebelum mencapai transport |
+| LID pemilik | Satu DM terverifikasi sebelum telepon | Lulus, masing-masing dikirim sekali |
+| Nomor telepon pemilik | Langsung telepon | Lulus, masing-masing dikirim sekali |
+
+Uji rute yang lebih kecil juga membaca riwayat sesi dari gateway yang
+dimuat ulang, lalu mengirim ke alamat sesi itu. Pada ke-14 commit di
+`main` dari `9f99925` hingga `907e804`, sesi dan riwayatnya terbaca,
+tetapi pengiriman ke LID pemilik baru berhasil setelah DM terverifikasi.
+Nomor pemilik dapat menerima kiriman sejak awal dan LID asing ditolak.
+
+Pada `b815440` dan `907e804`, probe hasil suara memberi model teks akhir
+sintetis yang mengklaim gambar sudah dikirim. Saat teks punya tanda kirim,
+masukan yang boleh diucapkan provider memuat klaim yang sama untuk dua
+hasil transport gambar, yaitu diterima (HTTP 200) dan ditolak (HTTP 422).
+Probe memeriksa masukan provider. Ucapan aktual di atas berasal dari
+panggilan pemilik. Pengujian lokal memakai macOS 27.2.1 arm64, Python
+3.12.15, pytest 9.2.0 dan Hermes v0.23.2 (`ae2a81ccc0`).
+
+Tiga puluh kasus dari snapshot awal terkait sesi, DM, dan izin pemilik
+lulus pada `9f99925` dan `907e804`. Skenario indikator mengetik dari
+`5af8963` gagal pada `978704f` untuk bot yang benar, lalu lulus pada
+`5af8963` dan `907e804`.
+
+Kandidat meneruskan kiriman ke nomor pemilik jika data pairing Hermes di
+profil itu memetakan LID lama langsung ke nomor tersebut. Uji gateway asli
+Hermes, dengan model dan transport WhatsApp uji, mengeksekusi satu tugas di
+sesi semula pada keempat skenario. Ketiga jalur sukses pada tabel masing-masing
+menghasilkan satu teks dan satu gambar. Pada skenario keempat, teks berhasil
+dan transport menolak gambar. Saat unggahan dijeda, Live tetap dapat membaca
+status dan belum mengonfirmasi pengiriman gambar.
+
+Adapter mencocokkan setiap percobaan kirim dengan tugas, lampiran, akun bot,
+tujuan, dan ID pesan pada tanda terima sidecar WhatsApp. Pengiriman melalui
+respons akhir dan pengiriman lampiran sesudah teks dialirkan memakai jalur
+asli Hermes v0.23.2. Untuk jalur kedua, plugin membaca event giliran,
+hasil eksekusi, dan identitas tugas aktif pada otoritas sesi Hermes. Jika
+bukti tersebut tidak tersedia, pengiriman tetap berjalan dan status lampiran
+tetap belum terkonfirmasi. Penerimaan oleh layanan pengirim dan penerimaan di
+ponsel adalah dua tahap dengan bukti yang berbeda.
+
+Untuk audio, kalimat hasil buatan model seperti “sudah kukirim” baru dapat
+dibacakan sebagai kutipan jika pemilik meminta isi teksnya. Status pengiriman
+dibaca terpisah. Ini berlaku juga bila Hermes menyimpan teks lalu menambahkan
+lampiran dari `image_generate` ketika mengirim respons. Uji mencakup riwayat
+awal, pembaruan selama telepon, serta pencarian riwayat yang sama. Peristiwa
+alat tetap langsung terlihat di Live. Kalimat sementara dari aliran teks
+diteruskan ke Live setelah alat berikutnya mulai pada tugas dan giliran itu.
+
+Pada dua uji audio Codex Realtime melalui WebRTC, pertanyaan pemilik dibuat
+dengan suara sintetis. Masukan alat menyertakan hasil kirim uji yang ditolak
+atau diterima layanan. Pada setiap uji, provider menghasilkan satu jawaban
+suara dan satu permintaan status. Uji penerimaan yang masih terbuka adalah
+melihat gambar tiba di DM pada ponsel selagi panggilan pertama tetap berjalan.
+
+Pada [revisi perbaikan `6446763`](https://github.com/dhansxd/wa-control-live/commit/644676328949a88edc9a5a5f7cd4cce5acba5a00),
+empat kasus pada `test_whatsapp_cold_delivery.py` lulus. Berkas uji yang sama
+pada `907e804` menghasilkan empat kegagalan. Satu kasus tidak mencapai
+transport, sedangkan tiga kasus lainnya tidak dapat melaporkan hasil kirim
+lampiran. Tiga puluh kasus sesi dan izin dari snapshot pertama dan dua kasus
+indikator mengetik dari `5af8963` juga lulus pada revisi perbaikan. Perbandingan
+langsung dengan `907e804` memberi hasil yang sama untuk 31 kasus sesi, DM,
+otorisasi, dan pembersihan serta 21 kasus giliran suara dan interupsi.
+
+Regresi lengkap pada lingkungan macOS arm64 dan Hermes v0.23.2 di atas
+meluluskan 826 tes Python dan 17 subtes. Pemeriksaan sintaks bridge dan tujuh
+tes Node lulus. Untuk komponen Rust yang sumbernya tetap sama, binary uji
+arm64 meluluskan 87 tes. Tujuh tes integrasi provider Rust bertanda `ignored`
+memerlukan pengaktifan tersendiri dan tidak dijalankan.
+
 ## Audit acuan ChatGPT Live Desktop
 
 Audit 22 November 2026 memakai kandidat lokal di atas `4e8726f`. Kontrak
