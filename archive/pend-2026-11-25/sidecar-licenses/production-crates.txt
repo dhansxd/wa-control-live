@@ -1,0 +1,310 @@
+aead v0.5.2|MIT OR Apache-2.0
+aead v0.6.1|MIT OR Apache-2.0
+aes v0.8.4|MIT OR Apache-2.0
+aes v0.9.3|MIT OR Apache-2.0
+aes-gcm v0.11.1|Apache-2.0 OR MIT
+aho-corasick v1.1.5|Unlicense OR MIT
+anstream v1.0.0|MIT OR Apache-2.0
+anstyle v1.0.14|MIT OR Apache-2.0
+anstyle-parse v1.0.0|MIT OR Apache-2.0
+anstyle-query v1.1.5|MIT OR Apache-2.0
+anyhow v1.0.104|MIT OR Apache-2.0
+asn1-rs v0.6.2|MIT OR Apache-2.0
+asn1-rs-derive v0.5.1 (proc-macro)|MIT OR Apache-2.0
+asn1-rs-impl v0.2.0 (proc-macro)|MIT/Apache-2.0
+async-channel v2.5.0|Apache-2.0 OR MIT
+async-lock v3.4.2|Apache-2.0 OR MIT
+async-trait v0.1.92 (proc-macro)|MIT OR Apache-2.0
+atomic-waker v1.1.2|Apache-2.0 OR MIT
+axum v0.8.9|MIT
+axum-core v0.5.6|MIT
+base64 v0.22.1|MIT OR Apache-2.0
+base64 v0.23.1|MIT OR Apache-2.0
+bitflags v2.13.2|MIT OR Apache-2.0
+block-buffer v0.10.4|MIT OR Apache-2.0
+block-buffer v0.12.1|MIT OR Apache-2.0
+block-padding v0.4.2|MIT OR Apache-2.0
+bon v3.10.2|MIT OR Apache-2.0
+bon-macros v3.10.2 (proc-macro)|MIT OR Apache-2.0
+borrow-or-share v0.2.4|MIT-0
+buffa v0.9.2|Apache-2.0
+bytecheck v0.8.3|MIT
+bytecheck_derive v0.8.3 (proc-macro)|MIT
+byteorder v1.5.0|Unlicense OR MIT
+bytes v1.12.1|MIT
+castaway v0.2.4|MIT
+cbc v0.2.1|MIT OR Apache-2.0
+ccm v0.5.0|Apache-2.0 OR MIT
+cfg-if v1.0.5|MIT OR Apache-2.0
+chacha20 v0.10.2|MIT OR Apache-2.0
+chrono v0.4.45|MIT OR Apache-2.0
+cipher v0.4.4|MIT OR Apache-2.0
+cipher v0.5.2|MIT OR Apache-2.0
+cmov v0.5.4|Apache-2.0 OR MIT
+colorchoice v1.0.5|MIT OR Apache-2.0
+compact_str v0.10.0|MIT
+concurrent-queue v2.5.0|Apache-2.0 OR MIT
+cpubits v0.1.1|MIT OR Apache-2.0
+cpufeatures v0.2.17|MIT OR Apache-2.0
+cpufeatures v0.3.1|MIT OR Apache-2.0
+crc32c v0.6.8|Apache-2.0/MIT
+crossbeam-utils v0.8.23|MIT OR Apache-2.0
+crypto-common v0.1.7|MIT OR Apache-2.0
+crypto-common v0.2.2|MIT OR Apache-2.0
+ctr v0.10.1|MIT OR Apache-2.0
+ctr v0.9.2|MIT OR Apache-2.0
+ctutils v0.4.3|Apache-2.0 OR MIT
+curve25519-dalek v5.0.0|BSD-3-Clause
+darling v0.21.3|MIT
+darling v0.24.1|MIT
+darling_core v0.21.3|MIT
+darling_core v0.24.1|MIT
+darling_macro v0.21.3 (proc-macro)|MIT
+darling_macro v0.24.1 (proc-macro)|MIT
+data-encoding v2.11.1|MIT
+der-parser v9.0.0|MIT/Apache-2.0
+deranged v0.5.9|MIT OR Apache-2.0
+diesel v2.3.14|MIT OR Apache-2.0
+diesel_derives v2.3.10 (proc-macro)|MIT OR Apache-2.0
+diesel_migrations v2.3.2|MIT OR Apache-2.0
+diesel_table_macro_syntax v0.3.0|MIT OR Apache-2.0
+digest v0.10.7|MIT OR Apache-2.0
+digest v0.11.3|MIT OR Apache-2.0
+displaydoc v0.2.7 (proc-macro)|MIT OR Apache-2.0
+downcast-rs v2.0.2|MIT OR Apache-2.0
+dsl_auto_type v0.2.0|MIT OR Apache-2.0
+either v1.19.0|MIT OR Apache-2.0
+env_filter v2.0.0|MIT OR Apache-2.0
+env_logger v0.11.11|MIT OR Apache-2.0
+errno v0.3.14|MIT OR Apache-2.0
+event-listener v5.4.2|Apache-2.0 OR MIT
+event-listener-strategy v0.5.4|Apache-2.0 OR MIT
+fastrand v2.5.0|Apache-2.0 OR MIT
+flate2 v1.1.10|MIT OR Apache-2.0
+fluent-uri v0.4.1|MIT
+fnv v1.0.7|Apache-2.0 / MIT
+foldhash v0.1.5|Zlib
+form_urlencoded v1.2.2|MIT OR Apache-2.0
+futures v0.3.34|MIT OR Apache-2.0
+futures-channel v0.3.34|MIT OR Apache-2.0
+futures-core v0.3.34|MIT OR Apache-2.0
+futures-io v0.3.34|MIT OR Apache-2.0
+futures-macro v0.3.34 (proc-macro)|MIT OR Apache-2.0
+futures-sink v0.3.34|MIT OR Apache-2.0
+futures-task v0.3.34|MIT OR Apache-2.0
+futures-util v0.3.34|MIT OR Apache-2.0
+generic-array v0.14.7|MIT
+getrandom v0.2.17|MIT OR Apache-2.0
+getrandom v0.3.4|MIT OR Apache-2.0
+getrandom v0.4.3|MIT OR Apache-2.0
+ghash v0.6.0|Apache-2.0 OR MIT
+hashbrown v0.15.5|MIT OR Apache-2.0
+hashbrown v0.17.1|MIT OR Apache-2.0
+heck v0.5.0|MIT OR Apache-2.0
+hermes-wa-voice v0.2.1-wa.opus.media.12 (./source/hermes-wa-voice-opus-media-1)|MIT
+hex v0.4.3|MIT OR Apache-2.0
+hkdf v0.13.0|MIT OR Apache-2.0
+hmac v0.12.1|MIT OR Apache-2.0
+hmac v0.13.0|MIT OR Apache-2.0
+http v1.5.0|MIT OR Apache-2.0
+http-body v1.1.0|MIT
+http-body-util v0.1.5|MIT
+httparse v1.10.1|MIT OR Apache-2.0
+httpdate v1.0.3|MIT OR Apache-2.0
+hybrid-array v0.4.15|MIT OR Apache-2.0
+hyper v1.12.0|MIT
+hyper-rustls v0.27.10|Apache-2.0 OR ISC OR MIT
+hyper-util v0.1.21|MIT
+icu_collections v2.3.0|Unicode-3.0
+icu_locale_core v2.3.0|Unicode-3.0
+icu_normalizer v2.3.0|Unicode-3.0
+icu_normalizer_data v2.3.0|Unicode-3.0
+icu_properties v2.3.0|Unicode-3.0
+icu_properties_data v2.3.0|Unicode-3.0
+icu_provider v2.3.1|Unicode-3.0
+ident_case v1.0.1|MIT/Apache-2.0
+idna v1.1.0|MIT OR Apache-2.0
+idna_adapter v1.2.2|Apache-2.0 OR MIT
+inout v0.1.4|MIT OR Apache-2.0
+inout v0.2.3|MIT OR Apache-2.0
+ipnet v2.12.2|MIT OR Apache-2.0
+is_terminal_polyfill v1.70.2|MIT OR Apache-2.0
+itoa v1.0.18|MIT OR Apache-2.0
+jiff v0.2.38|Unlicense OR MIT
+jiff-core v0.1.1|Unlicense OR MIT
+lazy_static v1.5.1|MIT OR Apache-2.0
+libc v0.2.190|MIT OR Apache-2.0
+libsqlite3-sys v0.38.2|MIT
+litemap v0.8.3|Unicode-3.0
+lock_api v0.4.14|MIT OR Apache-2.0
+log v0.4.34|MIT OR Apache-2.0
+matchit v0.8.4|MIT AND BSD-3-Clause
+md-5 v0.10.6|MIT OR Apache-2.0
+memchr v2.8.3|Unlicense OR MIT
+memoffset v0.9.1|MIT
+migrations_internals v2.3.0|MIT OR Apache-2.0
+migrations_macros v2.3.1 (proc-macro)|MIT OR Apache-2.0
+mime v0.3.17|MIT OR Apache-2.0
+minimal-lexical v0.2.1|MIT/Apache-2.0
+mio v1.2.4|MIT
+munge v0.4.7|MIT
+munge_macro v0.4.7 (proc-macro)|MIT
+nix v0.31.3|MIT
+nom v7.1.3|MIT
+num-bigint v0.4.8|MIT OR Apache-2.0
+num-conv v0.2.2|MIT OR Apache-2.0
+num-integer v0.1.47|MIT OR Apache-2.0
+num-traits v0.2.19|MIT OR Apache-2.0
+oid-registry v0.7.1|MIT OR Apache-2.0
+once_cell v1.21.4|MIT OR Apache-2.0
+opus v0.4.0|MIT/Apache-2.0
+opusic-sys v0.7.5|BSD-3-Clause
+parking v2.2.1|Apache-2.0 OR MIT
+parking_lot v0.12.5|MIT OR Apache-2.0
+parking_lot_core v0.9.12|MIT OR Apache-2.0
+pem v3.0.6|MIT
+pem v4.0.0|MIT
+percent-encoding v2.3.2|MIT OR Apache-2.0
+pin-project-lite v0.2.17|Apache-2.0 OR MIT
+polyval v0.7.3|Apache-2.0 OR MIT
+portable-atomic v1.15.0|Apache-2.0 OR MIT
+potential_utf v0.1.6|Unicode-3.0
+powerfmt v0.2.1|MIT OR Apache-2.0
+ppv-lite86 v0.2.21|MIT OR Apache-2.0
+prettyplease v0.3.0|MIT OR Apache-2.0
+proc-macro2 v1.0.107|MIT OR Apache-2.0
+ptr_meta v0.3.2|MIT
+ptr_meta_derive v0.3.2 (proc-macro)|MIT
+qrcode v0.14.1|MIT OR Apache-2.0
+quote v1.0.47|MIT OR Apache-2.0
+r2d2 v0.8.10|MIT/Apache-2.0
+rancor v0.1.3|MIT
+rand v0.10.3|MIT OR Apache-2.0
+rand v0.9.5|MIT OR Apache-2.0
+rand_chacha v0.9.0|MIT OR Apache-2.0
+rand_core v0.10.1|MIT OR Apache-2.0
+rand_core v0.6.4|MIT OR Apache-2.0
+rand_core v0.9.5|MIT OR Apache-2.0
+rcgen v0.14.10|MIT OR Apache-2.0
+ref-cast v1.0.27|MIT OR Apache-2.0
+ref-cast-impl v1.0.27 (proc-macro)|MIT OR Apache-2.0
+regex v1.13.1|MIT OR Apache-2.0
+regex-automata v0.4.18|MIT OR Apache-2.0
+regex-syntax v0.8.11|MIT OR Apache-2.0
+rend v0.5.4|MIT
+reqwest v0.12.28|MIT OR Apache-2.0
+ring v0.17.14|Apache-2.0 AND ISC
+rkyv v0.8.18|MIT
+rkyv_derive v0.8.18 (proc-macro)|MIT
+rtc-crypto v0.21.1|MIT/Apache-2.0
+rtc-datachannel v0.21.0-beta.2|MIT/Apache-2.0
+rtc-dtls v0.21.0-beta.2|MIT/Apache-2.0
+rtc-sctp v0.21.0-beta.2|MIT/Apache-2.0
+rtc-shared v0.21.0-beta.2|MIT/Apache-2.0
+rustc-hash v2.1.3|Apache-2.0 OR MIT
+rusticata-macros v4.1.0|MIT/Apache-2.0
+rustix v1.1.5|Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+rustls v0.23.46|Apache-2.0 OR ISC OR MIT
+rustls-pki-types v1.15.1|MIT OR Apache-2.0
+rustls-webpki v0.103.15|ISC
+rustversion v1.0.23 (proc-macro)|MIT OR Apache-2.0
+ryu v1.0.23|Apache-2.0 OR BSL-1.0
+sansio v1.0.1|MIT/Apache-2.0
+scheduled-thread-pool v0.2.7|MIT/Apache-2.0
+scopeguard v1.2.0|MIT OR Apache-2.0
+serde v1.0.229|MIT OR Apache-2.0
+serde-big-array v0.5.1|MIT OR Apache-2.0
+serde_core v1.0.229|MIT OR Apache-2.0
+serde_derive v1.0.229 (proc-macro)|MIT OR Apache-2.0
+serde_json v1.0.154|MIT OR Apache-2.0
+serde_path_to_error v0.1.20|MIT OR Apache-2.0
+serde_spanned v1.1.2|MIT OR Apache-2.0
+serde_urlencoded v0.7.1|MIT/Apache-2.0
+sha1 v0.10.7|MIT OR Apache-2.0
+sha1 v0.11.0|MIT OR Apache-2.0
+sha2 v0.11.1|MIT OR Apache-2.0
+signal-hook-registry v1.4.8|MIT OR Apache-2.0
+simdutf8 v0.1.5|MIT OR Apache-2.0
+slab v0.4.12|MIT
+smallvec v1.16.3|MIT OR Apache-2.0
+smoothutf8 v0.2.3|Apache-2.0
+socket2 v0.6.5|MIT OR Apache-2.0
+stable_deref_trait v1.2.1|MIT OR Apache-2.0
+static_assertions v1.1.0|MIT OR Apache-2.0
+strsim v0.11.1|MIT
+substring v1.4.5|MIT OR Apache-2.0
+subtle v2.6.1|BSD-3-Clause
+syn v2.0.119|MIT OR Apache-2.0
+syn v3.0.9|MIT OR Apache-2.0
+sync_wrapper v1.0.2|Apache-2.0
+synstructure v0.13.2|MIT
+synstructure v0.14.0|MIT
+tempfile v3.27.0|MIT OR Apache-2.0
+thiserror v1.0.69|MIT OR Apache-2.0
+thiserror v2.0.21|MIT OR Apache-2.0
+thiserror-impl v1.0.69 (proc-macro)|MIT OR Apache-2.0
+thiserror-impl v2.0.21 (proc-macro)|MIT OR Apache-2.0
+time v0.3.55|MIT OR Apache-2.0
+time-core v0.1.9|MIT OR Apache-2.0
+time-macros v0.2.32 (proc-macro)|MIT OR Apache-2.0
+tinystr v0.8.4|Unicode-3.0
+tokio v1.53.3|MIT
+tokio-macros v2.7.2 (proc-macro)|MIT
+tokio-rustls v0.26.6|MIT OR Apache-2.0
+tokio-tungstenite v0.28.0|MIT
+tokio-util v0.7.20|MIT
+tokio-websockets v0.13.3|MIT
+toml v0.9.12+spec-1.1.0|MIT OR Apache-2.0
+toml_datetime v0.7.5+spec-1.1.0|MIT OR Apache-2.0
+toml_parser v1.1.5+spec-1.1.0|MIT OR Apache-2.0
+tower v0.5.3|MIT
+tower-http v0.6.11|MIT
+tower-layer v0.3.3|MIT
+tower-service v0.3.3|MIT
+tracing v0.1.44|MIT
+tracing-core v0.1.36|MIT
+try-lock v0.2.5|MIT
+tungstenite v0.28.0|MIT OR Apache-2.0
+typenum v1.20.1|MIT OR Apache-2.0
+unicode-ident v1.0.27|(MIT OR Apache-2.0) AND Unicode-3.0
+universal-hash v0.6.1|MIT OR Apache-2.0
+untrusted v0.9.0|ISC
+ureq v3.4.2|MIT OR Apache-2.0
+ureq-proto v0.6.4|MIT OR Apache-2.0
+url v2.5.8|MIT OR Apache-2.0
+utf-8 v0.7.6|MIT OR Apache-2.0
+utf8-zero v0.8.1|MIT OR Apache-2.0
+utf8_iter v1.0.4|Apache-2.0 OR MIT
+utf8parse v0.2.2|Apache-2.0 OR MIT
+wacore v0.7.0 (./.build/whatsapp-rust-relays/wacore)|MIT
+wacore-appstate v0.7.0 (./.build/whatsapp-rust-relays/wacore/appstate)|MIT
+wacore-binary v0.7.0 (./.build/whatsapp-rust-relays/wacore/binary)|MIT
+wacore-derive v0.7.0 (proc-macro) (./.build/whatsapp-rust-relays/wacore/derive)|MIT
+wacore-libsignal v0.7.0 (./.build/whatsapp-rust-relays/wacore/libsignal)|MIT
+wacore-noise v0.7.0 (./.build/whatsapp-rust-relays/wacore/noise)|MIT
+want v0.3.2|MIT
+waproto v0.7.0 (./.build/whatsapp-rust-relays/waproto)|MIT
+webpki-roots v0.26.11|CDLA-Permissive-2.0
+webpki-roots v1.0.11|CDLA-Permissive-2.0
+whatsapp-rust v0.7.0 (./.build/whatsapp-rust-relays)|MIT
+whatsapp-rust-sqlite-storage v0.7.0 (./.build/whatsapp-rust-relays/storages/sqlite-storage)|MIT
+whatsapp-rust-tokio-transport v0.7.0 (./.build/whatsapp-rust-relays/transports/tokio-transport)|MIT
+whatsapp-rust-ureq-http-client v0.7.0 (./.build/whatsapp-rust-relays/http_clients/ureq-client)|MIT
+winnow v0.7.15|MIT
+winnow v1.0.4|MIT
+writeable v0.6.4|Unicode-3.0
+x25519-dalek v3.0.0|BSD-3-Clause
+x509-parser v0.16.0|MIT OR Apache-2.0
+yasna v0.6.0|MIT OR Apache-2.0
+yoke v0.8.3|Unicode-3.0
+yoke-derive v0.8.4 (proc-macro)|Unicode-3.0
+zerocopy v0.8.63|BSD-2-Clause OR Apache-2.0 OR MIT
+zerocopy-derive v0.8.63 (proc-macro)|BSD-2-Clause OR Apache-2.0 OR MIT
+zerofrom v0.1.8|Unicode-3.0
+zerofrom-derive v0.1.8 (proc-macro)|Unicode-3.0
+zeroize v1.9.1|Apache-2.0 OR MIT
+zerotrie v0.2.5|Unicode-3.0
+zerovec v0.11.8|Unicode-3.0
+zerovec-derive v0.11.6 (proc-macro)|Unicode-3.0
+zlib-rs v0.6.8|Zlib
+zmij v1.0.23|MIT

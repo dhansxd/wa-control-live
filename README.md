@@ -1,17 +1,18 @@
 # WA Control & Live
 
+**Status proyek: PENDING sejak 25 November 2026.** Pengembangan dijeda atas
+permintaan pemilik. Versi terakhir sebelum jeda adalah [v0.2.1, commit `66cace7`](https://github.com/dhansxd/wa-control-live/commit/66cace7dbb2d17f3eaa92dd66f03ca8df51f65cc).
+Untuk melanjutkan, baca [aturan proyek](AGENTS.md), [rencana](PLAN.md),
+[catatan serah terima](HANDOFF.md), dan [hasil pengujian](STATUS.md).
+Catatan riset, alat audit, dan tautan ke snapshot pengembangan lama ada
+di [arsip saat proyek dijeda](archive/pend-2026-11-25/README.md).
+
 Plugin komunitas untuk Hermes Agent yang menggabungkan kontrol multiakun
 WhatsApp, chatbot tamu, dan telepon Live. Akun bot memakai satu koneksi untuk
 Control, DM pemilik, dan telepon. Akun tambahan bisa ditautkan untuk Control.
 DM dan telepon mengikuti satu percakapan aktif di Hermes. Pilihan audio Live
 mencakup Codex CLI, Gemini Live, GPT-Live, broker Realtime Hermes, dan gateway
 WebSocket yang kompatibel dengan GPT-Live.
-
-**Status pengembangan.** Integrasi dan regresi lokal tersedia. Instalasi
-lengkap dengan WhatsApp dan provider nyata masih perlu diverifikasi pada calon
-rilis. Lihat [status fitur, batas verifikasi, dan pekerjaan tersisa](STATUS.md).
-Untuk melanjutkan proyek dari clone atau sesi baru, mulai dari
-[HANDOFF.md](HANDOFF.md) dan [aturan proyek](AGENTS.md).
 
 ## Install dan pairing
 

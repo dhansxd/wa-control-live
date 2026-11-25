@@ -50,6 +50,12 @@ arahan terbaru pemilik, perbarui aturan dan kriteria penerimaannya.
 
 ## Cara melanjutkan pekerjaan
 
+Untuk setiap pekerjaan di Codex, mulai dengan `superpowers:using-superpowers`
+dan gunakan skill yang relevan. Saat mengubah perilaku, jalankan skenario
+yang sama pada commit pembanding yang diketahui berfungsi dan pada kandidat.
+Untuk perbaikan bug, buktikan skenario gagal pada versi bermasalah dan lulus
+pada kandidat. Catat commit, skenario, hasil, serta lingkungan pengujian.
+
 1. Verifikasi status terhadap kode, tes, dan commit, karena checklist dapat
    tertinggal. Untuk regresi, cocokkan perilaku kode saat ini dengan revisi
    sebelumnya jika tersedia.
